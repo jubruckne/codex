@@ -8,7 +8,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, BorderType};
 use sha2::{Digest, Sha256};
 
-pub(super) const CARD_HEIGHT: u16 = 13;
+pub(super) const CARD_HEIGHT: u16 = 11;
 const IDLE_SECONDS: i64 = 10 * 60;
 const RESUME_SECONDS: i64 = 30 * 60;
 

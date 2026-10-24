@@ -13,16 +13,12 @@ expression: output
 │                                           │
 │                                           │
 │                                           │
-│                                           │
-│                                           │
 ╰────────────────────────── ↑ 1.1k · ↓ 300 ─╯
 ╭ ○ audit_scrollback_only ─────────────── ▲ ╮
 │ The agent has completed detailed source   │
 │ checks and is investigating the remaining │
 │ display issue. Next it plans to run       │
 │ focused tests.                            │
-│                                           │
-│                                           │
 │                                           │
 │                                           │
 │                                           │

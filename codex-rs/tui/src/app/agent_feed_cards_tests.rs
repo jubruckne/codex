@@ -55,32 +55,32 @@ fn text(buf: &Buffer) -> String {
     crate::app::owned_transcript::tests::buffer_text(buf)
 }
 #[test]
-fn agent_cards_have_thirteen_rows_stable_colors_and_right_aligned_reported_tokens() {
+fn agent_cards_have_eleven_rows_stable_colors_and_right_aligned_reported_tokens() {
     let mut feed = feed();
-    let buf = render(&feed, 45, 26);
+    let buf = render(&feed, 45, 22);
     let output = text(&buf);
     assert!(output.contains("feed_reasoning"));
     assert!(output.contains("audit_scrollback_only"));
-    for top in [0, 13] {
+    for top in [0, 11] {
         assert_eq!(buf[(0, top)].symbol(), "╭");
         assert_eq!(buf[(44, top)].symbol(), "╮");
-        assert_eq!(buf[(0, top + 12)].symbol(), "╰");
-        assert_eq!(buf[(44, top + 12)].symbol(), "╯");
+        assert_eq!(buf[(0, top + 10)].symbol(), "╰");
+        assert_eq!(buf[(44, top + 10)].symbol(), "╯");
         assert!(output.lines().nth(usize::from(top)).unwrap().contains("○ "));
         assert!(!output.contains("Idle"));
         assert!(
             output
                 .lines()
-                .nth(usize::from(top + 12))
+                .nth(usize::from(top + 10))
                 .unwrap()
                 .contains("↑ 1.1k · ↓ 300")
         );
     }
     let id = ThreadId::from_u128(3);
-    let before = buf[(0, 13)].fg;
+    let before = buf[(0, 11)].fg;
     assert_eq!(before, color(id));
     feed.cards.get_mut(&ThreadId::from_u128(2)).unwrap().closed = true;
-    let after = render(&feed, 45, 26);
+    let after = render(&feed, 45, 22);
     assert_eq!(after[(0, 0)].fg, before);
     assert!(!text(&after).contains("feed_reasoning"));
     insta::assert_snapshot!("agent_cards_two_agents", output);
@@ -215,11 +215,11 @@ fn agent_cards_inactive_name_and_border_share_gray_and_restore_on_activity() {
     let id = ThreadId::from_u128(2);
     let state = feed.cards.get_mut(&id).unwrap();
     state.last_activity = Some(chrono::Utc::now().timestamp() - 601);
-    let buf = render(&feed, 45, 26);
+    let buf = render(&feed, 45, 22);
     assert_eq!(buf[(0, 0)].fg, Color::DarkGray);
     assert_eq!(buf[(4, 0)].fg, buf[(0, 0)].fg);
     feed.cards.get_mut(&id).unwrap().last_activity = Some(chrono::Utc::now().timestamp());
-    let buf = render(&feed, 45, 26);
+    let buf = render(&feed, 45, 22);
     assert_eq!(buf[(0, 0)].fg, color(id));
     assert_eq!(buf[(4, 0)].fg, color(id));
 }
@@ -289,11 +289,11 @@ fn agent_cards_bound_summaries_without_moving_footer_or_breaking_unicode() {
         1001,
         false,
     );
-    let buf = render(&feed, 27, 26);
+    let buf = render(&feed, 27, 22);
     let output = text(&buf);
-    assert!(output.lines().nth(11).unwrap().contains('…'));
-    assert!(output.lines().nth(12).unwrap().contains("↑ 1.1k · ↓ 300"));
-    assert_eq!(buf[(26, 12)].symbol(), "╯");
+    assert!(output.lines().nth(9).unwrap().contains('…'));
+    assert!(output.lines().nth(10).unwrap().contains("↑ 1.1k · ↓ 300"));
+    assert_eq!(buf[(26, 10)].symbol(), "╯");
     for width in 0..9 {
         for height in [0, 1, 11, 12, 24] {
             let _ = render(&feed, width, height);
@@ -444,27 +444,27 @@ fn agent_cards_hide_token_counters_until_reported_usage_is_available() {
     let mut feed = feed();
     let id = ThreadId::from_u128(2);
     feed.cards.get_mut(&id).unwrap().tokens = None;
-    let buf = render(&feed, 45, 26);
+    let buf = render(&feed, 45, 22);
     let output = text(&buf);
-    let footer = output.lines().nth(12).unwrap();
+    let footer = output.lines().nth(10).unwrap();
     assert!(footer.starts_with('╰') && footer.ends_with('╯'));
     assert!(!footer.contains('↑') && !footer.contains('↓'), "{footer}");
     feed.cards.get_mut(&id).unwrap().tokens = Some((0, 0));
-    let buf = render(&feed, 45, 26);
-    assert!(text(&buf).lines().nth(12).unwrap().contains("↑ 0 · ↓ 0"));
+    let buf = render(&feed, 45, 22);
+    assert!(text(&buf).lines().nth(10).unwrap().contains("↑ 0 · ↓ 0"));
     feed.cards.get_mut(&id).unwrap().tokens = Some((1100, 300));
-    let buf = render(&feed, 45, 26);
+    let buf = render(&feed, 45, 22);
     assert!(
         text(&buf)
             .lines()
-            .nth(12)
+            .nth(10)
             .unwrap()
             .contains("↑ 1.1k · ↓ 300")
     );
 }
 
 #[test]
-fn agent_cards_use_all_eleven_interior_rows_and_show_state_in_the_title() {
+fn agent_cards_use_all_nine_interior_rows_and_show_state_in_the_title() {
     let mut feed = feed();
     let id = ThreadId::from_u128(2);
     // Use semantic plain text so markdown wrapping cannot introduce paragraph spacing.
@@ -483,11 +483,11 @@ fn agent_cards_use_all_eleven_interior_rows_and_show_state_in_the_title() {
         truncated: false,
         rendered: Default::default(),
     });
-    let buf = render(&feed, 45, 26);
+    let buf = render(&feed, 45, 22);
     let output = text(&buf);
     assert!(output.lines().nth(1).unwrap().contains("line01"));
-    assert!(output.lines().nth(11).unwrap().contains("line11"));
-    assert!(output.lines().nth(11).unwrap().contains('…'));
+    assert!(output.lines().nth(9).unwrap().contains("line09"));
+    assert!(output.lines().nth(9).unwrap().contains('…'));
     for (status, glyph) in [
         (ThreadStatus::Idle, "○"),
         (ThreadStatus::SystemError, "!"),
@@ -511,7 +511,7 @@ fn agent_cards_use_all_eleven_interior_rows_and_show_state_in_the_title() {
         ),
     ] {
         feed.cards.get_mut(&id).unwrap().status = status;
-        let buf = render(&feed, 45, 26);
+        let buf = render(&feed, 45, 22);
         let output = text(&buf);
         assert!(
             output
@@ -521,7 +521,7 @@ fn agent_cards_use_all_eleven_interior_rows_and_show_state_in_the_title() {
                 .contains(&format!("{glyph} ")),
             "{output}"
         );
-        assert!(!output.lines().nth(11).unwrap().contains("Working"));
+        assert!(!output.lines().nth(9).unwrap().contains("Working"));
     }
 }
 
