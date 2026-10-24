@@ -57,18 +57,25 @@ not guarantee that every newer frontend RPC is supported by an older service.
   summarization and resume notifications do not reset the inactivity clock.
   Empty resumed trees show no automatic windows; unknown token counts stay hidden.
   Manual F6 choices remain session-local.
-- On supported Macs, Apple Foundation Models summarize up to each agent's three
-  latest assistant responses and intervening public reasoning summaries from the
-  last 15 minutes. Input explicitly separates previous turns (background) from the
-  latest turn (current focus), including newly started turns with no output yet.
-  Earlier plans must not be presented as current work. The output is 40–60 words
-  in the agent's first person, using plain language rather than code identifiers. Live
-  source updates use their received event times; historical entries use available
+- On supported Macs, Apple Foundation Models summarize only the current turn's
+  assistant messages and public reasoning summaries while an agent is active, or
+  its most recent finished turn while idle. Failed/interrupted turns retain their
+  explicit outcome. Older turns never provide background to a current summary;
+  a new turn keeps the previous displayed summary until a valid replacement is
+  ready, while excluding all previous-turn text from the new model input.
+  The former three-response quota is replaced by bounded turn input (32 source
+  entries and a model-context byte budget), retaining the 15-minute source cutoff.
+  The prompt requests 30–40 words total in first person, in one or two short
+  paragraphs. It prioritizes the latest explicit
+  report, distinguishes research/proposals from implementation/verification, and
+  omits unsupported plans or blockers. Sparse evidence may yield fewer words.
+  Live source updates use received event times; historical entries use available
   turn-start timestamps conservatively, so recent output inside a long-running
   older turn can be omitted when item-level timing is unavailable. Inference runs
   asynchronously with serialized requests, cancellation, input-hash caching and
-  stale-result rejection. Startup unavailability disables semantic summaries and
-  keeps the latest response/thinking excerpt; there is no cloud fallback.
+  stale-result rejection, including lifecycle changes. Startup unavailability
+  disables semantic summaries and keeps the latest response/thinking excerpt;
+  there is no cloud fallback.
 - Fullscreen contextual feedback and Find/reverse-search queries share the gap
   above the composer, leaving drafts untouched. The separate passive hint row is
   removed; the configured model/usage/path/context bar remains below the composer.

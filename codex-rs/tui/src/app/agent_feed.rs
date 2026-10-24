@@ -268,7 +268,7 @@ impl Drop for AgentFeed {
 
 #[derive(Debug)]
 pub(crate) struct FeedSnapshot {
-    latest_turns: HashMap<ThreadId, String>,
+    latest_turns: HashMap<ThreadId, semantic::TurnHistory>,
     threads: Vec<Thread>,
     messages: Vec<(
         ThreadId,
@@ -503,7 +503,19 @@ impl App {
         }
         for (agent, turn) in snapshot.latest_turns {
             // A history request can finish after a newer live turn has started.
-            feed.windows.entry(agent).or_default().history_turn(turn);
+            let authoritative = feed.cards.get(&agent).is_none_or(|card| {
+                card.event_revision
+                    == self
+                        .agent_feed
+                        .card_versions
+                        .get(&agent)
+                        .copied()
+                        .unwrap_or(0)
+            });
+            feed.windows
+                .entry(agent)
+                .or_default()
+                .history_turns(turn, authoritative);
         }
         let mut chronology: HashMap<ThreadId, Vec<MessageKey>> = HashMap::new();
         for (id, turn, item, ..) in &snapshot.messages {
@@ -575,6 +587,18 @@ impl App {
                         .entry(agent)
                         .or_default()
                         .start_turn(&event.turn.id);
+                }
+                self.agent_feed.dirty = true;
+                return;
+            }
+            ServerNotification::TurnCompleted(event) => {
+                if let Ok(agent) = ThreadId::from_string(&event.thread_id)
+                    && feed.agents.contains_key(&agent)
+                {
+                    feed.windows
+                        .entry(agent)
+                        .or_default()
+                        .finish_turn(&event.turn.id, event.turn.status.clone());
                 }
                 self.agent_feed.dirty = true;
                 return;
@@ -652,9 +676,7 @@ impl App {
                 ),
                 _ => return,
             },
-            ServerNotification::ThreadStarted(_)
-            | ServerNotification::TurnCompleted(_)
-            | ServerNotification::ThreadStatusChanged(_) => {
+            ServerNotification::ThreadStarted(_) | ServerNotification::ThreadStatusChanged(_) => {
                 self.agent_feed.dirty = true;
                 return;
             }

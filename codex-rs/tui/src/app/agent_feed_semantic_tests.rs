@@ -14,8 +14,13 @@ fn message(agent: ThreadId, index: u64, reasoning: bool, text: &str) -> Message 
         rendered: Default::default(),
     }
 }
-fn input(text: &str) -> Arc<Input> {
+fn source_window() -> Window {
     let mut window = Window::default();
+    window.finish_turn("turn", TurnStatus::Completed);
+    window
+}
+fn input(text: &str) -> Arc<Input> {
+    let mut window = source_window();
     window.observe(&message(ThreadId::from_u128(2), 1, false, text));
     window.input().unwrap()
 }
@@ -29,9 +34,9 @@ fn job(revision: u64, text: &str) -> Job {
     }
 }
 #[test]
-fn semantic_window_retains_three_responses_and_intervening_summaries_in_order() {
+fn semantic_window_retains_selected_turn_responses_and_summaries_in_order() {
     let agent = ThreadId::from_u128(2);
-    let mut window = Window::default();
+    let mut window = source_window();
     for index in 0..6 {
         window.observe(&message(
             agent,
@@ -48,10 +53,10 @@ fn semantic_window_retains_three_responses_and_intervening_summaries_in_order() 
     }
     let input = window.input().unwrap();
     let text = format_entries(&input.entries, INPUT_BYTES, &input.latest_turn);
-    assert!(!text.contains("response 2"));
-    assert!(!text.contains("thinking 2"));
+    assert!(text.contains("response 2"));
+    assert!(text.contains("thinking 2"));
     let mut last = 0;
-    for index in 3..6 {
+    for index in 0..6 {
         for part in [format!("response {index}"), format!("thinking {index}")] {
             let offset = text.find(&part).unwrap();
             assert!(offset >= last);
@@ -64,7 +69,7 @@ fn semantic_window_retains_three_responses_and_intervening_summaries_in_order() 
             .iter()
             .filter(|entry| !entry.reasoning)
             .count(),
-        3
+        6
     );
     let previous = input.hash;
     let revision = window.revision;
@@ -102,7 +107,7 @@ fn semantic_windows_survive_global_feed_retention_and_bound_unicode() {
         );
     }
     assert!(!feed.messages.iter().any(|message| message.key.0 == first));
-    assert_eq!(feed.windows[&first].entries.len(), 3);
+    assert_eq!(feed.windows[&first].entries.len(), 4);
     for index in 0..100 {
         feed.reasoning_delta(
             MessageKey(first, "r".into(), index.to_string()),
@@ -112,15 +117,9 @@ fn semantic_windows_survive_global_feed_retention_and_bound_unicode() {
         );
     }
     let window = feed.windows.get_mut(&first).unwrap();
+    window.finish_turn("r", TurnStatus::Completed);
     let input = window.input().unwrap();
-    assert_eq!(
-        input
-            .entries
-            .iter()
-            .filter(|entry| !entry.reasoning)
-            .count(),
-        3
-    );
+    assert!(input.entries.iter().all(|entry| entry.reasoning));
     assert!(input.entries.len() <= 32);
     for budget in [2048, INPUT_BYTES] {
         let formatted = format_entries(&input.entries, budget, &input.latest_turn);
@@ -286,6 +285,7 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
         false,
     );
     let window = feed.windows.get_mut(&agent).unwrap();
+    window.finish_turn("t", TurnStatus::Completed);
     let old = window.revision;
     let old_hash = window.input().unwrap().hash;
     feed.reasoning_delta(
@@ -394,7 +394,7 @@ async fn semantic_apple_model_smoke() {
 #[test]
 fn semantic_history_order_overrides_arrival_times_without_restarting_unchanged_inputs() {
     let agent = ThreadId::from_u128(2);
-    let mut window = Window::default();
+    let mut window = source_window();
     let mut response = message(agent, 2, false, "second response");
     response.order = (chrono::Utc::now().timestamp_millis() + 1000, 1);
     window.observe(&response);
@@ -435,7 +435,7 @@ fn semantic_history_order_overrides_arrival_times_without_restarting_unchanged_i
 fn semantic_source_age_uses_milliseconds_and_expires_without_new_events() {
     let agent = ThreadId::from_u128(2);
     let now = 3_000_000;
-    let mut window = Window::default();
+    let mut window = source_window();
     window.observe_at(
         &message(agent, 1, false, "boundary response"),
         now - SOURCE_AGE_MS,
@@ -477,7 +477,7 @@ fn semantic_source_age_uses_milliseconds_and_expires_without_new_events() {
 #[test]
 fn semantic_unknown_history_dates_are_excluded_and_hydration_does_not_make_old_text_recent() {
     let agent = ThreadId::from_u128(2);
-    let mut window = Window::default();
+    let mut window = source_window();
     let unknown = message(agent, 1, false, "unknown date");
     window.observe_at(&unknown, 0);
     assert!(window.input_at(3_000_000).is_none());
@@ -494,7 +494,7 @@ fn semantic_unknown_history_dates_are_excluded_and_hydration_does_not_make_old_t
 fn semantic_streaming_updates_use_event_dates_without_reordering_or_repeating_unchanged_input() {
     let agent = ThreadId::from_u128(2);
     let now = 3_000_000;
-    let mut window = Window::default();
+    let mut window = source_window();
     let mut streamed = message(agent, 1, false, "initial source");
     let original_order = streamed.order;
     window.observe_at(&streamed, now - SOURCE_AGE_MS - 1);
@@ -545,9 +545,9 @@ async fn semantic_worker_rejects_expired_jobs_and_cancels_at_source_expiry() {
 }
 
 #[test]
-fn semantic_turn_boundaries_separate_background_from_current_work() {
+fn semantic_current_turn_excludes_every_previous_turn_entry() {
     let agent = ThreadId::from_u128(2);
-    let mut window = Window::default();
+    let mut window = source_window();
     for (index, turn, reasoning, text) in [
         (0, "old", false, "I finished the audit."),
         (1, "old", true, "I might examine the old test next."),
@@ -558,55 +558,104 @@ fn semantic_turn_boundaries_separate_background_from_current_work() {
         entry.key.1 = turn.into();
         window.observe(&entry);
     }
-    let input = window.input().unwrap();
-    let text = format_entries(&input.entries, 2048, &input.latest_turn);
-    let boundary = text.find("LATEST TURN — current focus").unwrap();
-    assert!(text.find("PREVIOUS TURN — background only").unwrap() < boundary);
-    assert!(text.find("old test next").unwrap() < boundary);
-    assert!(text.find("checking window resizing").unwrap() > boundary);
-    assert!(text.find("resizing fix passes").unwrap() > boundary);
-    assert_eq!(text.matches("=== ").count(), 2);
+    window.start_turn("new");
+    let input = window.input_for(true).unwrap();
+    assert_eq!(input.entries.len(), 2);
+    let text = input.formatted(2048);
+    assert!(text.contains("Current turn: in progress"));
+    assert!(!text.contains("audit"));
+    assert!(!text.contains("old test"));
+    assert!(text.contains("checking window resizing"));
+    assert!(text.contains("resizing fix passes"));
     assert!(text.len() <= 2048);
 }
 
 #[test]
-fn semantic_new_turn_invalidates_old_focus_before_output_and_changes_hash() {
+fn semantic_empty_current_turn_has_no_input_and_invalidates_previous_result() {
     let agent = ThreadId::from_u128(2);
-    let mut window = Window::default();
+    let mut window = source_window();
     window.observe(&message(agent, 0, false, "I plan to inspect an old test."));
     let old = window.input().unwrap();
     let revision = window.revision;
     window.start_turn("new");
-    let fresh = window.input().unwrap();
-    assert_ne!(old.hash, fresh.hash);
+    assert!(window.input_for(true).is_none());
     assert!(window.revision > revision);
-    let text = format_entries(&fresh.entries, INPUT_BYTES, &fresh.latest_turn);
-    assert!(text.contains("Latest turn: no assistant output yet"));
-    assert!(text.contains("PREVIOUS TURN — background only"));
-    assert!(!text.contains("LATEST TURN — current focus"));
-    window.history_turn("turn".into()); // A stale history response must not restore old focus.
-    assert_eq!(window.input().unwrap().hash, fresh.hash);
+    window.history_turns(
+        TurnHistory {
+            latest: Some(TurnContext {
+                id: "turn".into(),
+                status: TurnStatus::Completed,
+            }),
+            completed: Some(TurnContext {
+                id: "turn".into(),
+                status: TurnStatus::Completed,
+            }),
+        },
+        false,
+    );
+    assert!(
+        window.input_for(true).is_none(),
+        "stale history cannot restore old focus"
+    );
     let mut reasoning = message(agent, 1, true, "I'm checking a new task.");
     reasoning.key.1 = "new".into();
     window.observe(&reasoning);
-    let next = window.input().unwrap();
-    assert_ne!(next.hash, fresh.hash);
-    assert!(
-        format_entries(&next.entries, INPUT_BYTES, &next.latest_turn)
-            .contains("LATEST TURN — current focus")
-    );
+    let next = window.input_for(true).unwrap();
+    assert_ne!(next.hash, old.hash);
+    assert_eq!(next.entries.len(), 1);
 }
 
 #[test]
-fn semantic_resumed_empty_latest_turn_does_not_make_previous_turn_current() {
+fn semantic_idle_uses_last_finished_turn_while_active_empty_turn_stays_empty() {
     let agent = ThreadId::from_u128(2);
     let mut window = Window::default();
-    window.observe(&message(agent, 0, false, "Old progress."));
-    window.history_turn("resumed-new-turn".into());
-    let input = window.input().unwrap();
-    let text = format_entries(&input.entries, INPUT_BYTES, &input.latest_turn);
-    assert!(text.contains("Latest turn: no assistant output yet"));
-    assert!(text.contains("PREVIOUS TURN — background only"));
+    window.observe(&message(agent, 0, false, "I finished read-only research."));
+    window.history_turns(
+        TurnHistory {
+            latest: Some(TurnContext {
+                id: "empty-latest-turn".into(),
+                status: TurnStatus::InProgress,
+            }),
+            completed: Some(TurnContext {
+                id: "turn".into(),
+                status: TurnStatus::Completed,
+            }),
+        },
+        true,
+    );
+    assert!(window.input_for(true).is_none());
+    let idle = window.input_for(false).unwrap();
+    assert_eq!(idle.latest_turn, "turn");
+    assert!(
+        idle.formatted(INPUT_BYTES)
+            .contains("Last finished turn: completed")
+    );
+    window.start_turn("next");
+    let mut response = message(agent, 1, false, "I added tests but did not run them.");
+    response.key.1 = "next".into();
+    window.observe(&response);
+    let running = window.input_for(true).unwrap();
+    window.finish_turn("next", TurnStatus::Failed);
+    let failed = window.input_for(false).unwrap();
+    assert_eq!(failed.latest_turn, "next");
+    assert_ne!(
+        failed.hash, running.hash,
+        "lifecycle changes invalidate a running summary"
+    );
+    assert!(
+        failed
+            .formatted(INPUT_BYTES)
+            .contains("Last finished turn: failed")
+    );
+    assert_eq!(failed.entries.len(), 1);
+    window.finish_turn("next", TurnStatus::Interrupted);
+    assert!(
+        window
+            .input_for(false)
+            .unwrap()
+            .formatted(INPUT_BYTES)
+            .contains("interrupted")
+    );
 }
 
 #[tokio::test]
@@ -638,8 +687,15 @@ async fn semantic_turn_started_notification_changes_focus_before_any_model_outpu
         .windows
         .entry(agent)
         .or_default();
+    window.finish_turn("turn", TurnStatus::Completed);
     window.observe(&message(agent, 0, false, "Earlier work."));
     let previous = window.input().unwrap().hash;
+    let previous_revision = window.revision;
+    app.agent_feed.semantic_available = true;
+    let feed = app.agent_feed.roots.get_mut(&root).unwrap();
+    feed.bubbles
+        .push(message(agent, 99, false, "Previous turn summary."));
+    feed.published.insert(agent, previous);
     app.observe_agent_feed(&ServerNotification::TurnStarted(TurnStartedNotification {
         thread_id: agent.to_string(),
         turn: Turn {
@@ -662,11 +718,74 @@ async fn semantic_turn_started_notification_changes_focus_before_any_model_outpu
         .windows
         .get_mut(&agent)
         .unwrap();
-    let current = window.input().unwrap();
-    assert_ne!(current.hash, previous);
-    assert_eq!(current.latest_turn, "new-turn");
-    assert!(
-        format_entries(&current.entries, INPUT_BYTES, &current.latest_turn)
-            .contains("Latest turn: no assistant output yet")
+    assert!(window.input_for(true).is_none());
+    assert_ne!(window.last_hash, Some(previous));
+    assert_eq!(
+        app.agent_feed.roots[&root].bubbles[0].text,
+        "Previous turn summary."
     );
+    assert_eq!(
+        app.agent_feed.roots[&root].published.get(&agent),
+        Some(&previous)
+    );
+    app.apply_agent_feed_semantic(Event::Finished {
+        root,
+        agent,
+        revision: previous_revision,
+        hash: previous,
+        result: Ok("Obsolete previous-turn generation.".into()),
+    });
+    assert_eq!(
+        app.agent_feed.roots[&root].bubbles[0].text,
+        "Previous turn summary."
+    );
+    let feed = app.agent_feed.roots.get_mut(&root).unwrap();
+    feed.upsert(
+        MessageKey(agent, "new-turn".into(), "new-message".into()),
+        "I finished the new research.",
+        true,
+        true,
+        chrono::Utc::now().timestamp_millis(),
+        false,
+    );
+    let window = feed.windows.get_mut(&agent).unwrap();
+    let current = window.input_for(true).unwrap();
+    assert_eq!(current.entries.len(), 1);
+    assert!(!current.formatted(INPUT_BYTES).contains("Earlier work"));
+    let revision = window.revision;
+    app.apply_agent_feed_semantic(Event::Finished {
+        root,
+        agent,
+        revision,
+        hash: current.hash,
+        result: Ok("New turn summary.".into()),
+    });
+    let feed = &app.agent_feed.roots[&root];
+    assert_eq!(feed.bubbles.len(), 1);
+    assert_eq!(feed.bubbles[0].text, "New turn summary.");
+    assert_eq!(feed.published.get(&agent), Some(&current.hash));
+}
+
+#[test]
+fn semantic_missing_lifecycle_does_not_guess_a_current_or_completed_turn() {
+    let mut window = Window::default();
+    window.observe(&message(
+        ThreadId::from_u128(2),
+        0,
+        false,
+        "Old unclassified output.",
+    ));
+    assert!(window.input_for(true).is_none());
+    assert!(window.input_for(false).is_none());
+}
+
+#[test]
+fn semantic_summary_preserves_two_paragraphs_and_normalizes_wrapped_lines() {
+    assert_eq!(
+        normalize_summary(
+            "\nI finished  read-only\nresearch.\r\n  \r\nI have not\nchanged files.\n\nTests were not run.\n"
+        ),
+        "I finished read-only research.\n\nI have not changed files. Tests were not run."
+    );
+    assert_eq!(normalize_summary(" \n\t"), "");
 }

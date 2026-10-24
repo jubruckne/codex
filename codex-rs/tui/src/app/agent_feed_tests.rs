@@ -461,7 +461,10 @@ async fn agent_feed_history_rpc_is_passive_paged_and_recovers_messages() -> Resu
         snapshot
             .latest_turns
             .values()
-            .all(|turn| turn == "empty-latest-turn")
+            .all(
+                |turn| turn.latest.as_ref().unwrap().id == "empty-latest-turn"
+                    && turn.completed.as_ref().unwrap().id == "turn"
+            )
     );
     assert_eq!(snapshot.threads.len(), 2);
     let (mut app, _, _) = make_test_app_with_channels().await;
