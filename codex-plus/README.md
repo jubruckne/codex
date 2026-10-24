@@ -41,17 +41,28 @@ not guarantee that every newer frontend RPC is supported by an older service.
 - Fullscreen subagent windows start at 13 lines and eight columns wider than the
   original quarter-width default, tile from the right, and retain
   session positions and sizes. Drag a title to move, side/bottom borders to resize,
-  and click to bring forward. **▲** collapses to title and status; **▼** expands.
+  and click to bring forward. New windows start collapsed until summary/fallback
+  text is ready, then expand automatically. Explicit collapse/expand choices take
+  precedence. **▲** collapses to title and status; **▼** expands.
   **F6** toggles all windows. The title carries a status glyph (spinner while working, ○ idle, ? approval, ◇ input, ! error); reported
   tokens sit in the bottom border. All eleven
   interior rows are available for summary text. Animation settings are respected.
   The composer and main status bar stay unobscured.
-- Closed, unloaded, archived and deleted agents are hidden. Idle/error agents
-  disappear after ten minutes without activity; running/waiting agents remain.
-  Empty resumed trees show no automatic windows, and unknown token counts stay
-  hidden. Manual F6 choices remain session-local.
-- On supported Macs, Apple Foundation Models summarize each agent's four latest
-  assistant responses and intervening public reasoning summaries. Inference runs
+- On resume, inactive agents whose last known activity is over 30 minutes old are
+  omitted; more recent agents, including unloaded history, can be shown. Once
+  admitted in this TUI run, a window stays visible. Agents created during this run
+  remain visible even after closing; archive/delete removes them. After ten minutes
+  of inactivity, border, name and border counters turn gray together; fresh activity
+  restores the stable agent color. Running/waiting agents remain active. Polling,
+  summarization and resume notifications do not reset the inactivity clock.
+  Empty resumed trees show no automatic windows; unknown token counts stay hidden.
+  Manual F6 choices remain session-local.
+- On supported Macs, Apple Foundation Models summarize up to each agent's three
+  latest assistant responses and intervening public reasoning summaries from the
+  last 15 minutes. The output is 40–60 words in the agent's first person. Live
+  source updates use their received event times; historical entries use available
+  turn-start timestamps conservatively, so recent output inside a long-running
+  older turn can be omitted when item-level timing is unavailable. Inference runs
   asynchronously with serialized requests, cancellation, input-hash caching and
   stale-result rejection. Startup unavailability disables semantic summaries and
   keeps the latest response/thinking excerpt; there is no cloud fallback.

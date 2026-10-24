@@ -128,7 +128,7 @@ impl RootFeed {
             self.messages.push(message);
             self.messages.sort_by_key(|message| message.order);
         }
-        self.capture_summary_input(&observed_key);
+        self.capture_summary_input(&observed_key, timestamp);
         let mut bytes: usize = self.messages.iter().map(|message| message.text.len()).sum();
         while self.messages.len() > MAX_MESSAGES || bytes > MAX_BYTES {
             bytes -= self.messages.remove(0).text.len();
@@ -212,16 +212,19 @@ impl RootFeed {
         bound_message(message);
         *message.rendered.get_mut() = None;
         // Apply the shared aggregate limit after growing a reasoning item.
-        self.capture_summary_input(&key);
+        self.capture_summary_input(&key, timestamp);
         let mut bytes: usize = self.messages.iter().map(|message| message.text.len()).sum();
         while self.messages.len() > MAX_MESSAGES || bytes > MAX_BYTES {
             bytes -= self.messages.remove(0).text.len();
         }
     }
 
-    fn capture_summary_input(&mut self, key: &MessageKey) {
+    fn capture_summary_input(&mut self, key: &MessageKey, timestamp: i64) {
         if let Some(message) = self.messages.iter().find(|message| &message.key == key) {
-            self.windows.entry(key.0).or_default().observe(message);
+            self.windows
+                .entry(key.0)
+                .or_default()
+                .observe_at(message, timestamp);
         }
     }
 }
@@ -253,6 +256,7 @@ pub(super) struct AgentFeed {
     summarizer: Option<semantic::Client>,
     semantic_available: bool,
     card_versions: HashMap<ThreadId, u64>,
+    session_started_at: Option<i64>,
 }
 impl Drop for AgentFeed {
     fn drop(&mut self) {
@@ -280,6 +284,10 @@ pub(crate) struct FeedSnapshot {
 
 impl App {
     pub(super) fn sync_agent_feed_root(&mut self) {
+        let session_started_at = *self
+            .agent_feed
+            .session_started_at
+            .get_or_insert_with(|| chrono::Utc::now().timestamp());
         let root = self.agents_overview_root_id();
         if self.agent_feed.root != root {
             self.cancel_agent_window_drag();
@@ -304,7 +312,7 @@ impl App {
                 if id != root && belongs_to_root(id, root, &self.agents_overview.threads) {
                     feed.agents.insert(id, agent_label(thread));
                     let card = feed.cards.entry(id).or_default();
-                    card.metadata(thread, false);
+                    card.metadata(thread, false, session_started_at);
                     if let Some(tokens) = self
                         .agents_overview
                         .usage
@@ -315,6 +323,7 @@ impl App {
                             .then_some((tokens.input_tokens, tokens.output_tokens));
                     }
                     if self.agents_overview.removed_threads.contains(&id) {
+                        card.removed = true;
                         card.closed = true;
                     }
                 }
@@ -465,6 +474,10 @@ impl App {
         if self.agent_feed.root != Some(root) || self.agent_feed.generation != generation {
             return;
         }
+        let session_started_at = *self
+            .agent_feed
+            .session_started_at
+            .get_or_insert_with(|| chrono::Utc::now().timestamp());
         self.agent_feed.task = None;
         self.agent_feed.refreshed = Some(Instant::now());
         let feed = self.agent_feed.roots.entry(root).or_default();
@@ -475,9 +488,10 @@ impl App {
                 if card.event_revision
                     == self.agent_feed.card_versions.get(&id).copied().unwrap_or(0)
                 {
-                    card.metadata(&thread, true);
+                    card.metadata(&thread, true, session_started_at);
                 }
                 if self.agents_overview.removed_threads.contains(&id) {
+                    card.removed = true;
                     card.closed = true;
                 }
                 self.agents_overview

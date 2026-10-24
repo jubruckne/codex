@@ -118,7 +118,11 @@ fn agent_feed_empty_and_newest_messages() {
     let area = Rect::new(0, 0, 35, 12);
     let mut buf = Buffer::empty(area);
     feed.render_agent_card(id, area, false, &mut buf, Path::new("/tmp"));
-    assert!(crate::app::owned_transcript::tests::buffer_text(&buf).contains("No response yet."));
+    assert!(!crate::app::owned_transcript::tests::buffer_text(&buf).contains("No response yet."));
+    assert!(
+        !crate::app::owned_transcript::tests::buffer_text(&buf)
+            .contains("Waiting for a local summary")
+    );
     for n in 0..20 {
         feed.upsert(
             MessageKey(id, "t".into(), n.to_string()),

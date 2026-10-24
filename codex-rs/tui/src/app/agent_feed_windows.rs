@@ -24,6 +24,7 @@ struct Window {
     // Expanded geometry survives collapse; display geometry uses only three rows.
     rect: Rect,
     collapsed: bool,
+    awaiting_text: bool,
 }
 impl Window {
     fn displayed(self) -> Rect {
@@ -74,7 +75,12 @@ struct Gesture {
 }
 
 impl Windows {
+    #[cfg(test)]
     fn sync(&mut self, area: Rect, agents: &[ThreadId]) {
+        self.sync_ready(area, agents, &agents.iter().copied().collect());
+    }
+
+    fn sync_ready(&mut self, area: Rect, agents: &[ThreadId], ready: &HashSet<ThreadId>) {
         if self.viewport != area {
             self.gesture = None;
         }
@@ -93,6 +99,10 @@ impl Windows {
         }
         for id in agents {
             if let Some(window) = self.states.get_mut(id) {
+                if window.awaiting_text && ready.contains(id) {
+                    window.collapsed = false;
+                    window.awaiting_text = false;
+                }
                 window.clamp(area);
             }
         }
@@ -140,7 +150,8 @@ impl Windows {
                 occupied.push(rect);
                 Window {
                     rect,
-                    collapsed: false,
+                    collapsed: !ready.contains(id),
+                    awaiting_text: !ready.contains(id),
                 }
             });
             if !self.order.contains(id) {
@@ -187,6 +198,7 @@ impl Windows {
             let rect = window.displayed();
             let kind = if position.y == rect.y && position.x == rect.right().saturating_sub(3) {
                 window.collapsed = !window.collapsed;
+                window.awaiting_text = false;
                 window.clamp(self.viewport);
                 GestureKind::Toggle
             } else {
@@ -282,10 +294,28 @@ impl RootFeed {
             .filter(|id| self.card_visible(*id, now))
             .collect();
         agents.sort_by_key(|id| id.to_string());
+        let ready: HashSet<_> = agents
+            .iter()
+            .copied()
+            .filter(|id| {
+                if self.semantic {
+                    self.bubbles
+                        .iter()
+                        .rev()
+                        .find(|message| message.key.0 == *id)
+                        .is_some_and(|message| !message.text.trim().is_empty())
+                } else {
+                    self.windows
+                        .get(id)
+                        .and_then(semantic::Window::fallback_text)
+                        .is_some_and(|text| !text.trim().is_empty())
+                }
+            })
+            .collect();
         let (layout, started) = {
             let mut windows = self.windows_ui.borrow_mut();
             let started = *windows.animation_started.get_or_insert_with(Instant::now);
-            windows.sync(area, &agents);
+            windows.sync_ready(area, &agents, &ready);
             (
                 windows
                     .order
@@ -374,6 +404,40 @@ mod tests {
         windows.sync(Rect::new(0, 0, 160, 40), &[first, second]);
         (windows, first, second)
     }
+    #[test]
+    fn agent_windows_wait_collapsed_then_auto_expand_and_respect_manual_choice() {
+        let id = ThreadId::from_u128(1);
+        let area = Rect::new(0, 0, 160, 40);
+        let mut windows = Windows::default();
+        windows.sync_ready(area, &[id], &HashSet::new());
+        assert!(windows.states[&id].collapsed);
+        assert_eq!(windows.states[&id].displayed().height, 3);
+        windows.sync_ready(area, &[id], &HashSet::from([id]));
+        assert!(!windows.states[&id].collapsed);
+        assert_eq!(windows.states[&id].displayed().height, DEFAULT_HEIGHT);
+        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0));
+        windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 157, 0));
+        windows.sync_ready(area, &[id], &HashSet::from([id]));
+        assert!(
+            windows.states[&id].collapsed,
+            "new summaries must not undo manual collapse"
+        );
+        let mut manual = Windows::default();
+        manual.sync_ready(area, &[id], &HashSet::new());
+        manual.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0));
+        manual.mouse(&event(MouseEventKind::Up(MouseButton::Left), 157, 0));
+        manual.sync_ready(area, &[id], &HashSet::from([id]));
+        assert!(!manual.states[&id].awaiting_text);
+        let mut manually_collapsed = Windows::default();
+        manually_collapsed.sync_ready(area, &[id], &HashSet::new());
+        for _ in 0..2 {
+            manually_collapsed.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0));
+            manually_collapsed.mouse(&event(MouseEventKind::Up(MouseButton::Left), 157, 0));
+        }
+        manually_collapsed.sync_ready(area, &[id], &HashSet::from([id]));
+        assert!(manually_collapsed.states[&id].collapsed);
+    }
+
     #[test]
     fn agent_windows_tile_down_right_and_preserve_hidden_agent_geometry() {
         let (mut windows, first, second) = windows();

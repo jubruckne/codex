@@ -9,7 +9,7 @@ fn message(agent: ThreadId, index: u64, reasoning: bool, text: &str) -> Message 
         live: true,
         reasoning,
         parts: Vec::new(),
-        order: (index as i64, index),
+        order: (chrono::Utc::now().timestamp_millis() + index as i64, index),
         truncated: false,
         rendered: Default::default(),
     }
@@ -29,7 +29,7 @@ fn job(revision: u64, text: &str) -> Job {
     }
 }
 #[test]
-fn semantic_window_retains_four_responses_and_intervening_summaries_in_order() {
+fn semantic_window_retains_three_responses_and_intervening_summaries_in_order() {
     let agent = ThreadId::from_u128(2);
     let mut window = Window::default();
     for index in 0..6 {
@@ -48,10 +48,10 @@ fn semantic_window_retains_four_responses_and_intervening_summaries_in_order() {
     }
     let input = window.input().unwrap();
     let text = format_entries(&input.entries, INPUT_BYTES);
-    assert!(!text.contains("response 1"));
-    assert!(!text.contains("thinking 1"));
+    assert!(!text.contains("response 2"));
+    assert!(!text.contains("thinking 2"));
     let mut last = 0;
-    for index in 2..6 {
+    for index in 3..6 {
         for part in [format!("response {index}"), format!("thinking {index}")] {
             let offset = text.find(&part).unwrap();
             assert!(offset >= last);
@@ -64,7 +64,7 @@ fn semantic_window_retains_four_responses_and_intervening_summaries_in_order() {
             .iter()
             .filter(|entry| !entry.reasoning)
             .count(),
-        4
+        3
     );
     let previous = input.hash;
     let revision = window.revision;
@@ -87,7 +87,7 @@ fn semantic_windows_survive_global_feed_retention_and_bound_unicode() {
             "first response",
             true,
             true,
-            index,
+            chrono::Utc::now().timestamp_millis() + index,
             false,
         );
     }
@@ -97,18 +97,18 @@ fn semantic_windows_survive_global_feed_retention_and_bound_unicode() {
             "busy response",
             true,
             true,
-            index + 10,
+            chrono::Utc::now().timestamp_millis() + index + 10,
             false,
         );
     }
     assert!(!feed.messages.iter().any(|message| message.key.0 == first));
-    assert_eq!(feed.windows[&first].entries.len(), 4);
+    assert_eq!(feed.windows[&first].entries.len(), 3);
     for index in 0..100 {
         feed.reasoning_delta(
             MessageKey(first, "r".into(), index.to_string()),
             0,
             &"🌻".repeat(6000),
-            index + 300,
+            chrono::Utc::now().timestamp_millis() + index + 300,
         );
     }
     let window = feed.windows.get_mut(&first).unwrap();
@@ -119,7 +119,7 @@ fn semantic_windows_survive_global_feed_retention_and_bound_unicode() {
             .iter()
             .filter(|entry| !entry.reasoning)
             .count(),
-        4
+        3
     );
     assert!(input.entries.len() <= 32);
     for budget in [2048, INPUT_BYTES] {
@@ -149,6 +149,7 @@ impl Drop for Guard {
 }
 struct Fake {
     available: bool,
+    delay: Duration,
     counts: Arc<Counts>,
     started: tokio::sync::mpsc::UnboundedSender<()>,
 }
@@ -165,7 +166,7 @@ impl Backend for Fake {
             completed: false,
         };
         let _ = self.started.send(());
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(self.delay).await;
         guard.completed = true;
         Ok(input.entries.last().unwrap().text.clone())
     }
@@ -179,6 +180,7 @@ fn fake(available: bool) -> (Fake, tokio::sync::mpsc::UnboundedReceiver<()>, Arc
     (
         Fake {
             available,
+            delay: Duration::from_millis(100),
             counts: counts.clone(),
             started: tx,
         },
@@ -280,7 +282,7 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
         "original",
         true,
         true,
-        0,
+        chrono::Utc::now().timestamp_millis(),
         false,
     );
     let window = feed.windows.get_mut(&agent).unwrap();
@@ -290,7 +292,7 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
         MessageKey(agent, "t".into(), "r".into()),
         0,
         "new reasoning",
-        1,
+        chrono::Utc::now().timestamp_millis() + 1,
     );
     app.apply_agent_feed_semantic(Event::Finished {
         root,
@@ -342,7 +344,7 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
         "The focused tests passed.",
         true,
         true,
-        2,
+        chrono::Utc::now().timestamp_millis() + 2,
         false,
     );
     let window = feed.windows.get_mut(&agent).unwrap();
@@ -394,14 +396,14 @@ fn semantic_history_order_overrides_arrival_times_without_restarting_unchanged_i
     let agent = ThreadId::from_u128(2);
     let mut window = Window::default();
     let mut response = message(agent, 2, false, "second response");
-    response.order = (1000, 1);
+    response.order = (chrono::Utc::now().timestamp_millis() + 1000, 1);
     window.observe(&response);
     let initial = window.input().unwrap();
     let first_revision = window.revision;
     window.begin_history();
     let first = message(agent, 0, false, "first response");
     let mut thinking = message(agent, 1, true, "between responses");
-    thinking.order = (0, 1);
+    thinking.order = (chrono::Utc::now().timestamp_millis(), 1);
     window.observe(&first);
     window.observe(&thinking);
     window.observe(&response);
@@ -427,4 +429,114 @@ fn semantic_history_order_overrides_arrival_times_without_restarting_unchanged_i
     assert_eq!(window.input().unwrap().hash, input.hash);
     assert_eq!(window.revision, revision);
     assert_eq!(window.changed, changed);
+}
+
+#[test]
+fn semantic_source_age_uses_milliseconds_and_expires_without_new_events() {
+    let agent = ThreadId::from_u128(2);
+    let now = 3_000_000;
+    let mut window = Window::default();
+    window.observe_at(
+        &message(agent, 1, false, "boundary response"),
+        now - SOURCE_AGE_MS,
+    );
+    window.observe_at(
+        &message(agent, 2, true, "later reasoning"),
+        now - SOURCE_AGE_MS + 100,
+    );
+    window.observe_at(&message(agent, 3, false, "latest response"), now);
+    let boundary = window.input_at(now).unwrap();
+    assert_eq!(
+        boundary.entries.len(),
+        3,
+        "exactly fifteen minutes is retained"
+    );
+    let old_revision = window.revision;
+    let after = window.input_at(now + 1).unwrap();
+    assert_eq!(after.entries.len(), 2);
+    assert_ne!(after.hash, boundary.hash);
+    assert!(window.revision > old_revision);
+    assert!(!format_entries(&after.entries, INPUT_BYTES).contains("boundary response"));
+    let after_reasoning = window.input_at(now + 101).unwrap();
+    assert_eq!(after_reasoning.entries.len(), 1);
+    assert_ne!(after_reasoning.hash, after.hash);
+    let revision = window.revision;
+    assert!(window.input_at(now + SOURCE_AGE_MS + 1).is_none());
+    assert!(
+        window.revision > revision,
+        "empty input invalidates an outstanding generation"
+    );
+    let revision = window.revision;
+    assert!(window.input_at(now + SOURCE_AGE_MS + 2).is_none());
+    assert_eq!(window.revision, revision);
+}
+
+#[test]
+fn semantic_unknown_history_dates_are_excluded_and_hydration_does_not_make_old_text_recent() {
+    let agent = ThreadId::from_u128(2);
+    let mut window = Window::default();
+    let unknown = message(agent, 1, false, "unknown date");
+    window.observe_at(&unknown, 0);
+    assert!(window.input_at(3_000_000).is_none());
+    let old = message(agent, 2, false, "old persisted response");
+    for _ in 0..2 {
+        window.begin_history();
+        window.observe_at(&old, 1_000_000);
+        window.finish_history(&[unknown.key.clone(), old.key.clone()]);
+        assert!(window.input_at(3_000_000).is_none());
+    }
+}
+
+#[test]
+fn semantic_streaming_updates_use_event_dates_without_reordering_or_repeating_unchanged_input() {
+    let agent = ThreadId::from_u128(2);
+    let now = 3_000_000;
+    let mut window = Window::default();
+    let mut streamed = message(agent, 1, false, "initial source");
+    let original_order = streamed.order;
+    window.observe_at(&streamed, now - SOURCE_AGE_MS - 1);
+    assert!(window.input_at(now).is_none());
+    streamed.text = "new source update".into();
+    window.observe_at(&streamed, now - 1);
+    let input = window.input_at(now).unwrap();
+    assert_eq!(input.entries[0].order, original_order);
+    assert_eq!(input.entries[0].source_at_ms, now - 1);
+    let revision = window.revision;
+    window.observe_at(&streamed, now);
+    let refreshed = window.input_at(now).unwrap();
+    assert_eq!(refreshed.hash, input.hash);
+    assert_eq!(window.revision, revision);
+    assert!(refreshed.expires_at_ms > input.expires_at_ms);
+}
+
+#[tokio::test(start_paused = true)]
+async fn semantic_worker_rejects_expired_jobs_and_cancels_at_source_expiry() {
+    let (mut backend, mut started, counts) = fake(true);
+    backend.delay = Duration::from_secs(60);
+    let mut expired = job(1, "expired before inference");
+    Arc::get_mut(&mut expired.input).unwrap().expires_at_ms =
+        chrono::Utc::now().timestamp_millis() - 1;
+    let (tx, rx) = watch::channel(vec![expired]);
+    let (events, mut results) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(worker(backend, rx, move |event| {
+        let _ = events.send(event);
+    }));
+    assert!(matches!(
+        results.recv().await,
+        Some(Event::Availability(true))
+    ));
+    tokio::task::yield_now().await;
+    assert_eq!(counts.started.load(Ordering::SeqCst), 0);
+    let mut brief = job(2, "expires during inference");
+    Arc::get_mut(&mut brief.input).unwrap().expires_at_ms =
+        chrono::Utc::now().timestamp_millis() + 10_000;
+    tx.send_replace(vec![brief]);
+    started.recv().await.unwrap();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(counts.cancelled.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.active.load(Ordering::SeqCst), 0);
+    assert!(results.try_recv().is_err());
+    drop(tx);
+    task.await.unwrap();
 }

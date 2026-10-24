@@ -10,10 +10,14 @@ use sha2::{Digest, Sha256};
 
 pub(super) const CARD_HEIGHT: u16 = 13;
 const IDLE_SECONDS: i64 = 10 * 60;
+const RESUME_SECONDS: i64 = 30 * 60;
 
 pub(super) struct CardState {
     pub(super) status: ThreadStatus,
     last_activity: Option<i64>,
+    started_in_session: bool,
+    admitted: std::cell::Cell<bool>,
+    pub(super) removed: bool,
     metadata_at: i64,
     pub(super) event_revision: u64,
     pub(super) closed: bool,
@@ -24,6 +28,9 @@ impl Default for CardState {
         Self {
             status: ThreadStatus::Idle,
             last_activity: None,
+            started_in_session: false,
+            admitted: std::cell::Cell::new(false),
+            removed: false,
             metadata_at: -1,
             event_revision: 0,
             closed: false,
@@ -32,7 +39,8 @@ impl Default for CardState {
     }
 }
 impl CardState {
-    pub(super) fn metadata(&mut self, thread: &Thread, force: bool) {
+    pub(super) fn metadata(&mut self, thread: &Thread, force: bool, session_started_at: i64) {
+        self.started_in_session |= thread.created_at > 0 && thread.created_at >= session_started_at;
         if force || thread.updated_at > self.metadata_at {
             self.status = thread.status.clone();
             self.metadata_at = self.metadata_at.max(thread.updated_at);
@@ -45,15 +53,33 @@ impl CardState {
             }
         }
     }
+    fn inactive(&self, now: i64) -> bool {
+        (self.closed || !matches!(self.status, ThreadStatus::Active { .. }))
+            && self
+                .last_activity
+                .is_some_and(|time| now.saturating_sub(time) > IDLE_SECONDS)
+    }
+
     fn visible(&self, now: i64) -> bool {
-        !self.closed
-            && !matches!(self.status, ThreadStatus::NotLoaded)
-            && (matches!(self.status, ThreadStatus::Active { .. })
-                || self
-                    .last_activity
-                    .is_none_or(|time| now.saturating_sub(time) <= IDLE_SECONDS))
+        if self.removed || (self.closed && !self.started_in_session) {
+            return false;
+        }
+        // Admission is per TUI run. Aging changes styling rather than removing a window
+        // that was eligible when discovered. Unknown ages remain provisional.
+        if self.started_in_session
+            || matches!(self.status, ThreadStatus::Active { .. })
+            || self
+                .last_activity
+                .is_some_and(|time| now.saturating_sub(time) <= RESUME_SECONDS)
+        {
+            self.admitted.set(true);
+        }
+        self.admitted.get() || self.last_activity.is_none()
     }
     pub(super) fn label(&self) -> &'static str {
+        if self.closed {
+            return "Inactive";
+        }
         match &self.status {
             ThreadStatus::Active { active_flags }
                 if active_flags.contains(&ThreadActiveFlag::WaitingOnApproval) =>
@@ -68,7 +94,7 @@ impl CardState {
             ThreadStatus::Active { .. } => "Working",
             ThreadStatus::Idle => "Idle",
             ThreadStatus::SystemError => "Error",
-            ThreadStatus::NotLoaded => "Closed",
+            ThreadStatus::NotLoaded => "Inactive",
         }
     }
 }
@@ -123,15 +149,19 @@ impl RootFeed {
             return;
         }
         ratatui::widgets::Clear.render(card, buf);
-        let accent = color(agent);
         let state = self.cards.get(&agent);
+        let accent = if state.is_some_and(|state| state.inactive(chrono::Utc::now().timestamp())) {
+            Color::DarkGray
+        } else {
+            color(agent)
+        };
         let label = state.map(CardState::label).unwrap_or("Unknown");
         let working = activity.unwrap_or("◌");
         let glyph = match label {
             "Working" => working,
             "Awaiting approval" => "?",
             "Awaiting input" => "◇",
-            "Idle" => "○",
+            "Idle" | "Inactive" => "○",
             "Error" => "!",
             "Closed" => "×",
             _ => "·",
@@ -255,16 +285,6 @@ impl RootFeed {
         } else {
             Vec::new()
         };
-        if lines.is_empty() {
-            lines.push(
-                Line::from(if self.semantic {
-                    "Waiting for a local summary…"
-                } else {
-                    "No response yet."
-                })
-                .dim(),
-            );
-        }
         let rows = usize::from(card.height.saturating_sub(2));
         if rows > 0 && lines.len() > rows {
             lines.truncate(rows);
@@ -295,6 +315,7 @@ impl App {
             return;
         };
         let now = chrono::Utc::now().timestamp();
+        let session_started_at = *self.agent_feed.session_started_at.get_or_insert(now);
         let mut changed = false;
         for feed in self
             .agent_feed
@@ -304,17 +325,24 @@ impl App {
         {
             let card = feed.cards.entry(agent).or_default();
             match notification {
-                ServerNotification::ThreadClosed(_)
-                | ServerNotification::ThreadArchived(_)
-                | ServerNotification::ThreadDeleted(_) => {
+                ServerNotification::ThreadClosed(_) => {
+                    card.closed = true;
+                    card.status = ThreadStatus::NotLoaded;
+                }
+                ServerNotification::ThreadArchived(_) | ServerNotification::ThreadDeleted(_) => {
+                    card.removed = true;
                     card.closed = true;
                     card.tokens = None;
                 }
                 ServerNotification::ThreadStarted(event) => {
                     card.closed = false;
-                    card.metadata(&event.thread, true);
+                    card.removed = false;
+                    card.metadata(&event.thread, true, session_started_at);
                     card.tokens = None;
-                    card.last_activity = Some(now);
+                    // Resuming an old thread is not new productive activity.
+                    if card.started_in_session {
+                        card.last_activity = Some(now);
+                    }
                 }
                 ServerNotification::ThreadStatusChanged(event) => {
                     if matches!(card.status, ThreadStatus::Active { .. })

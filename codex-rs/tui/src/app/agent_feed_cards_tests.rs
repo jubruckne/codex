@@ -17,7 +17,7 @@ fn feed() -> RootFeed {
         feed.cards.insert(
             id,
             CardState {
-                last_activity: Some(1000),
+                last_activity: Some(chrono::Utc::now().timestamp()),
                 tokens: Some((1100, 300)),
                 ..Default::default()
             },
@@ -86,28 +86,144 @@ fn agent_cards_have_thirteen_rows_stable_colors_and_right_aligned_reported_token
     insta::assert_snapshot!("agent_cards_two_agents", output);
 }
 #[test]
-fn agent_cards_filter_closed_and_idle_after_ten_minutes_but_keep_running_and_waiting() {
-    let mut state = CardState {
+fn agent_cards_admit_recent_resumed_agents_and_keep_them_as_they_age() {
+    let state = CardState {
         last_activity: Some(100),
         ..Default::default()
     };
-    assert!(state.visible(700));
-    assert!(!state.visible(701));
-    state.status = ThreadStatus::Active {
-        active_flags: Vec::new(),
+    assert!(state.visible(1900));
+    assert!(
+        state.visible(9999),
+        "an admitted window ages into gray rather than disappearing"
+    );
+    assert!(state.inactive(701));
+    assert!(!state.inactive(700));
+    let mut unknown = CardState::default();
+    assert!(unknown.visible(1901));
+    unknown.last_activity = Some(100);
+    assert!(
+        !unknown.visible(1901),
+        "unknown dates must not permanently admit stale history"
+    );
+    let old = CardState {
+        last_activity: Some(100),
+        ..Default::default()
     };
-    assert!(state.visible(9999));
-    state.status = ThreadStatus::Active {
-        active_flags: vec![ThreadActiveFlag::WaitingOnUserInput],
+    assert!(
+        !old.visible(1901),
+        "a fresh resume omits agents idle over thirty minutes"
+    );
+    let unloaded = CardState {
+        last_activity: Some(100),
+        status: ThreadStatus::NotLoaded,
+        ..Default::default()
     };
-    assert!(state.visible(9999));
-    assert_eq!(state.label(), "Awaiting input");
-    state.closed = true;
-    assert!(!state.visible(100));
-    state.closed = false;
-    state.status = ThreadStatus::NotLoaded;
-    assert!(!state.visible(100));
+    assert!(
+        unloaded.visible(1900),
+        "recent unloaded history is still useful on resume"
+    );
+    let running = CardState {
+        last_activity: Some(100),
+        status: ThreadStatus::Active {
+            active_flags: vec![ThreadActiveFlag::WaitingOnUserInput],
+        },
+        ..Default::default()
+    };
+    assert!(running.visible(9999));
+    assert!(!running.inactive(9999));
+    let new = CardState {
+        last_activity: Some(100),
+        started_in_session: true,
+        closed: true,
+        ..Default::default()
+    };
+    assert!(new.visible(9999));
+    assert!(new.inactive(9999));
+    let removed = CardState {
+        started_in_session: true,
+        removed: true,
+        ..Default::default()
+    };
+    assert!(!removed.visible(100));
 }
+
+#[tokio::test]
+async fn agent_cards_resume_does_not_refresh_activity_and_current_run_agents_survive_close() {
+    let (mut app, _, _) = make_test_app_with_channels().await;
+    let root = ThreadId::from_u128(1);
+    let id = ThreadId::from_u128(2);
+    let now = chrono::Utc::now().timestamp();
+    app.primary_thread_id = Some(root);
+    app.active_thread_id = Some(root);
+    app.local_settings.tui.fullscreen_transcript = true;
+    let mut thread = overview_thread(id, Some(root), "worker", ThreadStatus::Idle);
+    thread.created_at = now - 7200;
+    thread.updated_at = now - 1801;
+    app.agents_overview.threads.insert(id, Some(thread.clone()));
+    app.sync_agent_feed_root();
+    assert!(!app.agent_feed.roots[&root].card_visible(id, now));
+    app.observe_agent_feed(&ServerNotification::ThreadStarted(
+        codex_app_server_protocol::ThreadStartedNotification {
+            thread: thread.clone(),
+        },
+    ));
+    let card = &app.agent_feed.roots[&root].cards[&id];
+    assert_eq!(card.last_activity, Some(thread.updated_at));
+    assert!(!card.visible(now));
+    thread.created_at = now + 1;
+    thread.updated_at = now + 1;
+    app.observe_agent_feed(&ServerNotification::ThreadStarted(
+        codex_app_server_protocol::ThreadStartedNotification { thread },
+    ));
+    app.observe_agent_feed(&ServerNotification::ThreadClosed(
+        ThreadClosedNotification {
+            thread_id: id.to_string(),
+        },
+    ));
+    let card = app
+        .agent_feed
+        .roots
+        .get_mut(&root)
+        .unwrap()
+        .cards
+        .get_mut(&id)
+        .unwrap();
+    card.last_activity = Some(now - 3600);
+    assert!(card.visible(now));
+    assert!(card.inactive(now));
+}
+
+#[test]
+fn agent_cards_new_session_identity_uses_creation_time_not_resume_notifications() {
+    let mut thread = overview_thread(ThreadId::from_u128(2), None, "worker", ThreadStatus::Idle);
+    thread.created_at = 100;
+    thread.updated_at = 200;
+    let mut resumed = CardState::default();
+    resumed.metadata(&thread, true, 1000);
+    assert!(!resumed.started_in_session);
+    assert!(!resumed.visible(2001));
+    thread.created_at = 1001;
+    let mut created = CardState::default();
+    created.metadata(&thread, true, 1000);
+    assert!(created.started_in_session);
+    assert!(created.visible(10000));
+}
+
+#[test]
+fn agent_cards_inactive_name_and_border_share_gray_and_restore_on_activity() {
+    let mut feed = feed();
+    let id = ThreadId::from_u128(2);
+    let state = feed.cards.get_mut(&id).unwrap();
+    state.last_activity = Some(chrono::Utc::now().timestamp() - 601);
+    let buf = render(&feed, 45, 26);
+    assert_eq!(buf[(0, 0)].fg, Color::DarkGray);
+    assert_eq!(buf[(4, 0)].fg, buf[(0, 0)].fg);
+    feed.cards.get_mut(&id).unwrap().last_activity = Some(chrono::Utc::now().timestamp());
+    let buf = render(&feed, 45, 26);
+    assert_eq!(buf[(0, 0)].fg, color(id));
+    assert_eq!(buf[(4, 0)].fg, color(id));
+}
+
 #[test]
 fn agent_cards_collapse_to_status_only_and_clear_only_the_window_rectangle() {
     let feed = feed();
@@ -293,7 +409,10 @@ async fn agent_cards_delayed_metadata_cannot_resurrect_a_closed_agent() {
 #[test]
 fn agent_feed_auto_visibility_matches_renderable_cards_and_preserves_f6_override() {
     let mut feed = feed();
-    // A resumed tree may retain descendants while every card is old, closed, or unloaded.
+    // A resumed tree may retain descendants while every card is old or explicitly closed.
+    for card in feed.cards.values_mut() {
+        card.last_activity = Some(1000);
+    }
     assert!(!feed.enabled());
     let id = ThreadId::from_u128(2);
     let card = feed.cards.get_mut(&id).unwrap();
@@ -303,11 +422,11 @@ fn agent_feed_auto_visibility_matches_renderable_cards_and_preserves_f6_override
     let card = feed.cards.get_mut(&id).unwrap();
     card.closed = false;
     card.status = ThreadStatus::NotLoaded;
-    assert!(!feed.enabled());
+    assert!(feed.enabled());
     feed.cards.get_mut(&id).unwrap().status = ThreadStatus::Idle;
     assert!(feed.enabled());
     feed.cards.get_mut(&id).unwrap().last_activity = Some(1000);
-    assert!(!feed.enabled());
+    assert!(feed.enabled(), "admitted windows stay in the current run");
     feed.cards.get_mut(&id).unwrap().status = ThreadStatus::Active {
         active_flags: Vec::new(),
     };
