@@ -68,10 +68,14 @@ not guarantee that every newer frontend RPC is supported by an older service.
   The prompt requests 30–40 words total in first person, in one or two short
   paragraphs, plus a separate single-sentence caption of at most ten words for
   collapsed windows in place of status text. Both are generated in one request
-  and replaced together after validation; no caption placeholder is shown.
-  It prioritizes the latest explicit
-  report, distinguishes research/proposals from implementation/verification, and
-  omits unsupported plans or blockers. Sparse evidence may yield fewer words.
+  through Apple's schema-guided generation and replaced together after validation;
+  no caption placeholder is shown. Concise instructions and two simple examples
+  distinguish research/proposals from implementation/verification. Tense is selected
+  in code for the turn's lifecycle. While idle, a completed final assistant report
+  supersedes earlier thinking and updates; thinking remains available when no such
+  report exists. Summaries over 40 words or captions over ten words are retried
+  once, then rejected while the previous text remains visible. Sparse evidence may
+  yield fewer words than the 30-word target.
   Live source updates use received event times; historical entries use available
   turn-start timestamps conservatively, so recent output inside a long-running
   older turn can be omitted when item-level timing is unavailable. Inference runs

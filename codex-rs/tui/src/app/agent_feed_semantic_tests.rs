@@ -22,7 +22,7 @@ fn summary(text: &str) -> Summary {
 }
 fn source_window() -> Window {
     let mut window = Window::default();
-    window.finish_turn("turn", TurnStatus::Completed);
+    window.start_turn("turn");
     window
 }
 fn input(text: &str) -> Arc<Input> {
@@ -389,20 +389,43 @@ async fn semantic_apple_model_smoke() {
     if !backend.available() {
         return;
     }
-    let data = input(
-        "I finished read-only source research. I identified existing tool-result fields and proposed bounded evidence records for a future frontend change. I did not implement the design, edit files, or run tests. My report is ready for integration planning.",
-    );
-    let result = tokio::time::timeout(Duration::from_secs(60), backend.summarize(&data))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(backend.settle().await);
-    assert!(!result.text.is_empty());
-    assert!(!result.caption.is_empty());
-    eprintln!(
-        "Local summary: {}\nCaption: {}",
-        result.text, result.caption
-    );
+    for (label, text, unsupported) in [
+        (
+            "read-only recommendation",
+            "I finished read-only source research and identified existing tool-result fields. I recommend compact evidence records and factual evaluation fixtures. I did not implement changes, edit files, or run tests.",
+            vec!["i implemented", "i ran tests", "i plan to"],
+        ),
+        (
+            "proposal and future plan",
+            "I inspected the cache implementation and proposed a design. I have not changed files. I plan to implement the design next.",
+            vec!["i implemented", "i'm implementing", "i am implementing"],
+        ),
+        (
+            "tests added but not run",
+            "I added regression tests for the parser. I have not run them. Next I will run the focused test suite.",
+            vec!["tests passed", "i ran", "i verified"],
+        ),
+    ] {
+        let mut window = source_window();
+        window.observe(&message(ThreadId::from_u128(2), 0, false, text));
+        window.finish_turn("turn", TurnStatus::Completed);
+        let data = window.input_for(false).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(60), backend.summarize(&data))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(backend.settle().await);
+        assert!(result.text.split_whitespace().count() <= 40);
+        assert!(result.caption.split_whitespace().count() <= 10);
+        let output = format!("{} {}", result.text, result.caption).to_lowercase();
+        for claim in unsupported {
+            assert!(
+                !output.contains(claim),
+                "{label}: unsupported claim {claim:?} in {output}"
+            );
+        }
+        eprintln!("{label}: {}\nCaption: {}", result.text, result.caption);
+    }
 }
 
 #[test]
@@ -822,25 +845,83 @@ fn semantic_summary_preserves_two_paragraphs_and_normalizes_wrapped_lines() {
 }
 
 #[test]
-fn semantic_parses_summary_and_caption_together_and_rejects_partial_results() {
-    let raw = serde_json::json!({
-        "summary": "I finished read-only research.\n\nI have not changed files.",
-        "caption": "I finished  read-only\nresearch.",
-    })
-    .to_string();
-    let result = parse_summary(&raw).unwrap();
+fn semantic_validates_summary_and_caption_lengths_without_cutting_sentences() {
+    let valid = Summary {
+        text: "I finished read-only research.\n\nI have not changed files.".into(),
+        caption: "I finished  read-only\nresearch.".into(),
+    };
+    let result = validate_summary(valid).unwrap();
     assert_eq!(
         result.text,
         "I finished read-only research.\n\nI have not changed files."
     );
     assert_eq!(result.caption, "I finished read-only research.");
-    assert_eq!(parse_summary(&format!("```json\n{raw}\n```")), Ok(result));
+    assert!(
+        validate_summary(Summary {
+            text: "word ".repeat(40),
+            caption: "word ".repeat(10)
+        })
+        .is_ok()
+    );
     for bad in [
-        "not json",
-        r#"{"summary":"Done"}"#,
-        r#"{"summary":"Done","caption":" "}"#,
-        r#"{"summary":" ","caption":"Done."}"#,
+        Summary {
+            text: "word ".repeat(41),
+            caption: "Done.".into(),
+        },
+        Summary {
+            text: "Done.".into(),
+            caption: "word ".repeat(11),
+        },
+        Summary {
+            text: "Done.".into(),
+            caption: " ".into(),
+        },
+        Summary {
+            text: " ".into(),
+            caption: "Done.".into(),
+        },
     ] {
-        assert!(parse_summary(bad).is_err());
+        assert!(validate_summary(bad).is_err());
     }
+}
+
+#[test]
+fn semantic_idle_final_report_supersedes_earlier_reasoning_and_plans() {
+    let agent = ThreadId::from_u128(2);
+    let mut window = source_window();
+    window.observe(&message(
+        agent,
+        1,
+        true,
+        "I might implement this and run tests.",
+    ));
+    window.observe(&message(agent, 2, false, "I'm investigating the design."));
+    window.observe(&message(
+        agent,
+        3,
+        false,
+        "I finished read-only research. No files changed or tests run.",
+    ));
+    assert_eq!(window.input_for(true).unwrap().entries.len(), 3);
+    window.finish_turn("turn", TurnStatus::Completed);
+    let final_report = window.input_for(false).unwrap();
+    assert_eq!(final_report.entries.len(), 1);
+    assert!(
+        !final_report
+            .formatted(INPUT_BYTES)
+            .contains("might implement")
+    );
+    assert!(
+        final_report
+            .formatted(INPUT_BYTES)
+            .contains("No files changed")
+    );
+    let hash = final_report.hash;
+    window.observe(&message(
+        agent,
+        1,
+        true,
+        "Late delivery of an old speculative idea.",
+    ));
+    assert_eq!(window.input_for(false).unwrap().hash, hash);
 }
