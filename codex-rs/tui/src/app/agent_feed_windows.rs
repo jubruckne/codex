@@ -502,6 +502,10 @@ mod tests {
         let id = ThreadId::from_u128(1);
         let mut feed = feed;
         feed.agents.insert(id, "worker".into());
+        feed.cards.entry(id).or_default().status =
+            codex_app_server_protocol::ThreadStatus::Active {
+                active_flags: vec![],
+            };
         feed.windows_ui
             .borrow_mut()
             .sync(Rect::new(0, 0, 160, 40), &[id]);

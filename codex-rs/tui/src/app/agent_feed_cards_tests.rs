@@ -19,6 +19,7 @@ fn feed() -> RootFeed {
             CardState {
                 last_activity: Some(chrono::Utc::now().timestamp()),
                 tokens: Some((1100, 300)),
+                admitted: std::cell::Cell::new(true),
                 ..Default::default()
             },
         );
@@ -86,51 +87,55 @@ fn agent_cards_have_eleven_rows_stable_colors_and_right_aligned_reported_tokens(
     insta::assert_snapshot!("agent_cards_two_agents", output);
 }
 #[test]
-fn agent_cards_admit_recent_resumed_agents_and_keep_them_as_they_age() {
-    let state = CardState {
-        last_activity: Some(100),
-        ..Default::default()
-    };
-    assert!(state.visible(1000));
-    assert!(
-        state.visible(9999),
-        "an admitted window ages into gray rather than disappearing"
-    );
-    assert!(state.inactive(701));
-    assert!(!state.inactive(700));
-    let mut unknown = CardState::default();
-    assert!(unknown.visible(1001));
-    unknown.last_activity = Some(100);
-    assert!(
-        !unknown.visible(1001),
-        "unknown dates must not permanently admit stale history"
-    );
-    let old = CardState {
-        last_activity: Some(100),
-        ..Default::default()
-    };
-    assert!(
-        !old.visible(1001),
-        "a fresh resume omits agents idle over fifteen minutes"
-    );
-    let unloaded = CardState {
-        last_activity: Some(100),
-        status: ThreadStatus::NotLoaded,
-        ..Default::default()
-    };
-    assert!(
-        unloaded.visible(1000),
-        "recent unloaded history is still useful on resume"
-    );
-    let running = CardState {
+fn agent_cards_resume_only_generating_agents_and_admit_later_activity() {
+    for status in [
+        ThreadStatus::Idle,
+        ThreadStatus::NotLoaded,
+        ThreadStatus::SystemError,
+        ThreadStatus::Active {
+            active_flags: vec![ThreadActiveFlag::WaitingOnApproval],
+        },
+        ThreadStatus::Active {
+            active_flags: vec![ThreadActiveFlag::WaitingOnUserInput],
+        },
+    ] {
+        for last_activity in [None, Some(100), Some(9999)] {
+            let mut state = CardState {
+                status: status.clone(),
+                last_activity,
+                ..Default::default()
+            };
+            assert!(
+                !state.visible(9999),
+                "resumed {status:?} must stay hidden regardless of recency"
+            );
+            state.status = ThreadStatus::Active {
+                active_flags: vec![],
+            };
+            assert!(
+                state.visible(9999),
+                "a hidden agent appears when it starts generating"
+            );
+            state.status = ThreadStatus::Idle;
+            assert!(
+                state.visible(9999),
+                "admitted agents remain available in this run"
+            );
+        }
+    }
+    let mut running = CardState {
         last_activity: Some(100),
         status: ThreadStatus::Active {
-            active_flags: vec![ThreadActiveFlag::WaitingOnUserInput],
+            active_flags: vec![],
         },
         ..Default::default()
     };
     assert!(running.visible(9999));
     assert!(!running.inactive(9999));
+    running.status = ThreadStatus::Idle;
+    assert!(running.visible(9999));
+    assert!(running.inactive(701));
+    assert!(!running.inactive(700));
     let new = CardState {
         last_activity: Some(100),
         started_in_session: true,
@@ -138,7 +143,6 @@ fn agent_cards_admit_recent_resumed_agents_and_keep_them_as_they_age() {
         ..Default::default()
     };
     assert!(new.visible(9999));
-    assert!(new.inactive(9999));
     let removed = CardState {
         started_in_session: true,
         removed: true,
@@ -410,9 +414,9 @@ async fn agent_cards_delayed_metadata_cannot_resurrect_a_closed_agent() {
 #[test]
 fn agent_feed_auto_visibility_matches_renderable_cards_and_preserves_f6_override() {
     let mut feed = feed();
-    // A resumed tree may retain descendants while every card is old or explicitly closed.
+    // A resumed tree can retain idle descendants, including ones with recent activity.
     for card in feed.cards.values_mut() {
-        card.last_activity = Some(1000);
+        card.admitted.set(false);
     }
     assert!(!feed.enabled());
     let id = ThreadId::from_u128(2);
@@ -423,15 +427,23 @@ fn agent_feed_auto_visibility_matches_renderable_cards_and_preserves_f6_override
     let card = feed.cards.get_mut(&id).unwrap();
     card.closed = false;
     card.status = ThreadStatus::NotLoaded;
-    assert!(feed.enabled());
+    assert!(!feed.enabled());
     feed.cards.get_mut(&id).unwrap().status = ThreadStatus::Idle;
-    assert!(feed.enabled());
-    feed.cards.get_mut(&id).unwrap().last_activity = Some(1000);
-    assert!(feed.enabled(), "admitted windows stay in the current run");
+    assert!(!feed.enabled());
+    feed.cards.get_mut(&id).unwrap().status = ThreadStatus::Active {
+        active_flags: vec![ThreadActiveFlag::WaitingOnApproval],
+    };
+    assert!(!feed.enabled());
     feed.cards.get_mut(&id).unwrap().status = ThreadStatus::Active {
         active_flags: Vec::new(),
     };
-    assert!(feed.enabled());
+    assert!(
+        feed.enabled(),
+        "a resumed agent opens the view when generation starts"
+    );
+    feed.cards.get_mut(&id).unwrap().status = ThreadStatus::Idle;
+    feed.cards.get_mut(&id).unwrap().last_activity = Some(1000);
+    assert!(feed.enabled(), "admitted windows stay in the current run");
     feed.manual = Some(false);
     assert!(!feed.enabled());
     feed.cards.get_mut(&id).unwrap().closed = true;

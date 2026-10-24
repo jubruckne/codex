@@ -59,21 +59,18 @@ impl CardState {
                 .is_some_and(|time| now.saturating_sub(time) > IDLE_SECONDS)
     }
 
-    fn visible(&self, now: i64) -> bool {
+    fn visible(&self, _now: i64) -> bool {
         if self.removed || (self.closed && !self.started_in_session) {
             return false;
         }
-        // Admission is per TUI run. Aging changes styling rather than removing a window
-        // that was eligible when discovered. Unknown ages remain provisional.
+        // Historical agents enter the view only while actually generating. Once
+        // admitted, they remain available during this TUI run as before.
         if self.started_in_session
-            || matches!(self.status, ThreadStatus::Active { .. })
-            || self
-                .last_activity
-                .is_some_and(|time| now.saturating_sub(time) <= RECENT_AGENT_SECONDS)
+            || matches!(&self.status, ThreadStatus::Active { active_flags } if active_flags.is_empty())
         {
             self.admitted.set(true);
         }
-        self.admitted.get() || self.last_activity.is_none()
+        self.admitted.get()
     }
     pub(super) fn label(&self) -> &'static str {
         if self.closed {
@@ -116,7 +113,7 @@ impl RootFeed {
     pub(super) fn card_visible(&self, agent: ThreadId, now: i64) -> bool {
         self.cards
             .get(&agent)
-            .is_none_or(|state| state.visible(now))
+            .is_some_and(|state| state.visible(now))
     }
     #[cfg(test)]
     pub(super) fn render_agent_card(

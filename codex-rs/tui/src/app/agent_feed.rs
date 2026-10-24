@@ -19,8 +19,6 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
-// Shared by resume admission and semantic source freshness.
-const RECENT_AGENT_SECONDS: i64 = 15 * 60;
 const MAX_MESSAGES: usize = 200;
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;

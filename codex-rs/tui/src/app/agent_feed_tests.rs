@@ -151,16 +151,19 @@ async fn agent_feed_auto_activation_manual_override_and_resize() -> Result<()> {
     tui.set_owned_screen(true)?;
     app.sync_agent_feed_root();
     assert!(!app.agent_windows_enabled(&tui));
-    app.agents_overview.threads.insert(
-        child,
-        Some(overview_thread(
-            child,
-            Some(root),
-            "Worker",
-            ThreadStatus::Idle,
-        )),
-    );
+    let mut resumed = overview_thread(child, Some(root), "Worker", ThreadStatus::Idle);
+    resumed.created_at = app.agent_feed.session_started_at.unwrap() - 60;
+    app.agents_overview.threads.insert(child, Some(resumed));
     app.sync_agent_feed_root();
+    assert!(!app.agent_windows_enabled(&tui));
+    app.observe_agent_feed(&ServerNotification::ThreadStatusChanged(
+        codex_app_server_protocol::ThreadStatusChangedNotification {
+            thread_id: child.to_string(),
+            status: ThreadStatus::Active {
+                active_flags: vec![],
+            },
+        },
+    ));
     assert!(app.agent_windows_enabled(&tui));
     app.toggle_agent_feed(&mut tui);
     assert!(!app.agent_windows_enabled(&tui));
@@ -471,6 +474,7 @@ async fn agent_feed_history_rpc_is_passive_paged_and_recovers_messages() -> Resu
     app.primary_thread_id = Some(root);
     app.active_thread_id = Some(root);
     app.sync_agent_feed_root();
+    app.local_settings.tui.fullscreen_transcript = true;
     let versions = snapshot.versions.clone();
     let threads = snapshot.threads.clone();
     app.apply_agent_feed_snapshot(root, app.agent_feed.generation, snapshot);
@@ -487,6 +491,22 @@ async fn agent_feed_history_rpc_is_passive_paged_and_recovers_messages() -> Resu
             .all(|message| message.text == "Recovered thinking\n\nMore thinking")
     );
     let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    feed.render_windows(area, &mut buf, Path::new("/tmp"), None);
+    let rendered = crate::app::owned_transcript::tests::buffer_text(&buf);
+    assert!(
+        !rendered.contains("Reply from"),
+        "resumed idle agents stay hidden"
+    );
+    app.observe_agent_feed(&ServerNotification::ThreadStatusChanged(
+        codex_app_server_protocol::ThreadStatusChangedNotification {
+            thread_id: child.to_string(),
+            status: ThreadStatus::Active {
+                active_flags: vec![],
+            },
+        },
+    ));
+    let feed = &app.agent_feed.roots[&root];
     let mut buf = Buffer::empty(area);
     feed.render_windows(area, &mut buf, Path::new("/tmp"), None);
     let rendered = crate::app::owned_transcript::tests::buffer_text(&buf);

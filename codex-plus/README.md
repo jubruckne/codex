@@ -48,15 +48,16 @@ not guarantee that every newer frontend RPC is supported by an older service.
   tokens sit in the bottom border. All nine
   interior rows are available for summary text. Animation settings are respected.
   The composer and main status bar stay unobscured.
-- On resume, inactive agents whose last known activity is over 15 minutes old are
-  omitted; more recent agents, including unloaded history, can be shown. Once
-  admitted in this TUI run, a window stays visible. Agents created during this run
-  remain visible even after closing; archive/delete removes them. After ten minutes
-  of inactivity, border, name and border counters turn gray together; fresh activity
-  restores the stable agent color. Running/waiting agents remain active. Polling,
-  summarization and resume notifications do not reset the inactivity clock.
-  Empty resumed trees show no automatic windows; unknown token counts stay hidden.
-  Manual F6 choices remain session-local.
+- On resume, only agents actively generating are admitted to the floating view;
+  idle/unloaded/error states and agents waiting for input or approval stay hidden,
+  regardless of recency. A hidden agent appears automatically when it begins
+  generating. Once admitted in this TUI run, a window stays visible. Agents created
+  during this run remain visible even after closing; archive/delete removes them.
+  After ten minutes of inactivity, border, name and border counters turn gray
+  together; fresh activity restores the stable agent color. Polling, summarization
+  and resume notifications do not reset the inactivity clock. Empty resumed trees
+  show no automatic windows; unknown token counts stay hidden. Manual F6 choices
+  remain session-local.
 - On supported Macs, Apple Foundation Models summarize only the current turn's
   assistant messages and public reasoning summaries while an agent is active, or
   its most recent finished turn while idle. Failed/interrupted turns retain their

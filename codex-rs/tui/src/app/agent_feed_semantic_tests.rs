@@ -286,6 +286,16 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
     let feed = app.agent_feed.roots.entry(root).or_default();
     feed.semantic = true;
     feed.agents.insert(agent, "Worker".into());
+    let thread = crate::app::agents_overview::tests::overview_thread(
+        agent,
+        None,
+        "Worker",
+        codex_app_server_protocol::ThreadStatus::Idle,
+    );
+    feed.cards
+        .entry(agent)
+        .or_default()
+        .metadata(&thread, true, thread.created_at);
     feed.upsert(
         MessageKey(agent, "t".into(), "m".into()),
         "original",
@@ -346,7 +356,7 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
     let mut buf = Buffer::empty(area);
     feed.render_agent_card(agent, area, false, &mut buf, Path::new("/tmp"));
     let text = crate::app::owned_transcript::tests::buffer_text(&buf);
-    assert!(text.contains("╭ · Worker"));
+    assert!(text.contains("╭ ○ Worker"));
     assert!(text.contains("Completed the parser fix."));
     assert!(!text.contains("new reasoning"));
     insta::assert_snapshot!("semantic_agent_bubble", text);
