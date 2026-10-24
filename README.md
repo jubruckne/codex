@@ -1,3 +1,5 @@
+> **Codex++ branch:** custom frontend build, features, and maintenance instructions are in [codex-plus/README.md](codex-plus/README.md).
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
