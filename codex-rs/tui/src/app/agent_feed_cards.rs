@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 
 pub(super) const CARD_HEIGHT: u16 = 11;
 const IDLE_SECONDS: i64 = 10 * 60;
-const RESUME_SECONDS: i64 = 30 * 60;
 
 pub(super) struct CardState {
     pub(super) status: ThreadStatus,
@@ -70,7 +69,7 @@ impl CardState {
             || matches!(self.status, ThreadStatus::Active { .. })
             || self
                 .last_activity
-                .is_some_and(|time| now.saturating_sub(time) <= RESUME_SECONDS)
+                .is_some_and(|time| now.saturating_sub(time) <= RECENT_AGENT_SECONDS)
         {
             self.admitted.set(true);
         }

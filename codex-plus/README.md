@@ -48,7 +48,7 @@ not guarantee that every newer frontend RPC is supported by an older service.
   tokens sit in the bottom border. All nine
   interior rows are available for summary text. Animation settings are respected.
   The composer and main status bar stay unobscured.
-- On resume, inactive agents whose last known activity is over 30 minutes old are
+- On resume, inactive agents whose last known activity is over 15 minutes old are
   omitted; more recent agents, including unloaded history, can be shown. Once
   admitted in this TUI run, a window stays visible. Agents created during this run
   remain visible even after closing; archive/delete removes them. After ten minutes

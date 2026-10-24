@@ -91,7 +91,7 @@ fn agent_cards_admit_recent_resumed_agents_and_keep_them_as_they_age() {
         last_activity: Some(100),
         ..Default::default()
     };
-    assert!(state.visible(1900));
+    assert!(state.visible(1000));
     assert!(
         state.visible(9999),
         "an admitted window ages into gray rather than disappearing"
@@ -99,10 +99,10 @@ fn agent_cards_admit_recent_resumed_agents_and_keep_them_as_they_age() {
     assert!(state.inactive(701));
     assert!(!state.inactive(700));
     let mut unknown = CardState::default();
-    assert!(unknown.visible(1901));
+    assert!(unknown.visible(1001));
     unknown.last_activity = Some(100);
     assert!(
-        !unknown.visible(1901),
+        !unknown.visible(1001),
         "unknown dates must not permanently admit stale history"
     );
     let old = CardState {
@@ -110,8 +110,8 @@ fn agent_cards_admit_recent_resumed_agents_and_keep_them_as_they_age() {
         ..Default::default()
     };
     assert!(
-        !old.visible(1901),
-        "a fresh resume omits agents idle over thirty minutes"
+        !old.visible(1001),
+        "a fresh resume omits agents idle over fifteen minutes"
     );
     let unloaded = CardState {
         last_activity: Some(100),
@@ -119,7 +119,7 @@ fn agent_cards_admit_recent_resumed_agents_and_keep_them_as_they_age() {
         ..Default::default()
     };
     assert!(
-        unloaded.visible(1900),
+        unloaded.visible(1000),
         "recent unloaded history is still useful on resume"
     );
     let running = CardState {
