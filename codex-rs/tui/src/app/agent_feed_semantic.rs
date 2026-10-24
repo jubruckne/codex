@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::watch;
 
-const DEBOUNCE: Duration = Duration::from_millis(750);
+const PROMPT_PREFIX: &str = "Coding-agent update:\n";
 const INPUT_BYTES: usize = 12_000;
 const CACHE_ENTRIES: usize = 128;
 const SOURCE_AGE_MS: i64 = 15 * 60 * 1000;
@@ -196,6 +196,10 @@ impl Window {
             .iter()
             .filter(|entry| {
                 focus.as_ref().is_some_and(|turn| turn.id == entry.key.1)
+                    && (entry.complete
+                        || focus
+                            .as_ref()
+                            .is_some_and(|turn| turn.status != TurnStatus::InProgress))
                     && entry.source_at_ms > 0
                     && now_ms.saturating_sub(entry.source_at_ms) <= SOURCE_AGE_MS
             })
@@ -247,7 +251,7 @@ impl Window {
             expires_at_ms,
         };
         let mut hash = Sha256::new();
-        hash.update(input.instructions());
+        hash.update(INSTRUCTIONS);
         hash.update(input.latest_turn.as_bytes());
         hash.update(input.formatted(INPUT_BYTES).as_bytes());
         input.hash = hash.finalize().into();
@@ -269,8 +273,8 @@ struct Input {
     expires_at_ms: i64,
 }
 impl Input {
-    fn instructions(&self) -> String {
-        let state = match self.status {
+    fn state_instruction(&self) -> &'static str {
+        match self.status {
             TurnStatus::InProgress => {
                 "The agent is active. Describe its latest reported activity; keep planned work in the future tense."
             }
@@ -283,8 +287,7 @@ impl Input {
             TurnStatus::Interrupted => {
                 "The turn was interrupted. Describe reported work in the past tense; do not assume unfinished operations succeeded."
             }
-        };
-        format!("{INSTRUCTIONS}\n{state}")
+        }
     }
 
     fn formatted(&self, budget: usize) -> String {
@@ -296,11 +299,12 @@ impl Input {
             TurnStatus::Failed => "Last finished turn: failed.\n",
             TurnStatus::Interrupted => "Last finished turn: interrupted.\n",
         };
+        let header = format!("{PROMPT_PREFIX}{}\n{lifecycle}", self.state_instruction());
         format!(
-            "{lifecycle}{}",
+            "{header}{}",
             format_entries(
                 &self.entries,
-                budget.saturating_sub(lifecycle.len()),
+                budget.saturating_sub(header.len()),
                 &self.latest_turn
             )
         )
@@ -453,6 +457,24 @@ impl Job {
             && self.input.expires_at_ms == other.input.expires_at_ms
     }
 }
+type AgentKey = (ThreadId, ThreadId);
+
+#[derive(Clone, Default)]
+struct Work {
+    jobs: Vec<Job>,
+    // Separate from jobs: keep a clean session even between items or after publication.
+    agents: HashSet<AgentKey>,
+}
+#[cfg(test)]
+impl From<Vec<Job>> for Work {
+    fn from(jobs: Vec<Job>) -> Self {
+        Self {
+            agents: jobs.iter().map(|job| (job.root, job.agent)).collect(),
+            jobs,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum Event {
     Availability(bool),
@@ -465,11 +487,11 @@ pub(crate) enum Event {
     },
 }
 pub(super) struct Client {
-    desired: watch::Sender<Vec<Job>>,
+    desired: watch::Sender<Work>,
 }
 impl Client {
     fn start(tx: AppEventSender) -> Option<Self> {
-        let (desired, rx) = watch::channel(Vec::new());
+        let (desired, rx) = watch::channel(Work::default());
         std::thread::Builder::new()
             .name("codex-agent-summaries".into())
             .spawn(move || {
@@ -491,16 +513,13 @@ impl Client {
 
 trait Backend {
     fn available(&self) -> bool;
-    async fn summarize(&mut self, input: &Input) -> Result<Summary, String>;
+    fn prepare(&mut self, _agents: &HashSet<AgentKey>, _immediate: &HashSet<AgentKey>) {}
+    async fn summarize(&mut self, agent: AgentKey, input: &Input) -> Result<Summary, String>;
     // Dropping a generation future requests native cancellation. Do not release the single
     // inference slot until Swift confirms it has wound down (or disable this worker).
     async fn settle(&mut self) -> bool;
 }
-async fn worker(
-    mut backend: impl Backend,
-    mut rx: watch::Receiver<Vec<Job>>,
-    emit: impl Fn(Event),
-) {
+async fn worker(mut backend: impl Backend, mut rx: watch::Receiver<Work>, emit: impl Fn(Event)) {
     let available = backend.available();
     emit(Event::Availability(available));
     if !available {
@@ -510,8 +529,9 @@ async fn worker(
     let mut cache: VecDeque<(Hash, Result<Summary, String>)> = VecDeque::new();
     loop {
         let desired = rx.borrow_and_update().clone();
-        finished.retain(|key, _| desired.iter().any(|job| (job.root, job.agent) == *key));
+        finished.retain(|key, _| desired.jobs.iter().any(|job| (job.root, job.agent) == *key));
         let candidate = desired
+            .jobs
             .iter()
             .filter(|job| {
                 finished.get(&(job.root, job.agent))
@@ -519,6 +539,17 @@ async fn worker(
             })
             .min_by_key(|job| job.ready)
             .cloned();
+        let immediate = desired
+            .jobs
+            .iter()
+            .filter(|job| {
+                job.ready <= tokio::time::Instant::now()
+                    && finished.get(&(job.root, job.agent))
+                        != Some(&(job.revision, job.input.hash, job.input.expires_at_ms))
+            })
+            .map(|job| (job.root, job.agent))
+            .collect();
+        backend.prepare(&desired.agents, &immediate);
         let Some(job) = candidate else {
             if rx.changed().await.is_err() {
                 return;
@@ -547,7 +578,7 @@ async fn worker(
             Some(result)
         } else {
             let result = {
-                let generation = backend.summarize(&job.input);
+                let generation = backend.summarize((job.root, job.agent), &job.input);
                 tokio::pin!(generation);
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
                 let fresh_for = job
@@ -560,7 +591,7 @@ async fn worker(
                 loop {
                     tokio::select! { biased;
                         changed = rx.changed() => {
-                            if changed.is_err() || !rx.borrow().iter().any(|current| current.same(&job)) { break None; }
+                            if changed.is_err() || !rx.borrow().jobs.iter().any(|current| current.same(&job)) { break None; }
                         }
                         result = &mut generation => break Some(result),
                         _ = tokio::time::sleep_until(source_deadline) => break None,
@@ -591,7 +622,7 @@ async fn worker(
             );
             continue;
         }
-        if !rx.borrow().iter().any(|current| current.same(&job)) {
+        if !rx.borrow().jobs.iter().any(|current| current.same(&job)) {
             continue;
         }
         if !cache.iter().any(|(hash, _)| *hash == job.input.hash) {
@@ -615,26 +646,73 @@ async fn worker(
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct PreparedSession {
+    session: foundation_models::LanguageModelSession,
+    warmed: bool,
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[derive(Default)]
 struct Apple {
     session: Option<foundation_models::LanguageModelSession>,
     schema: Option<foundation_models::GenerationSchema>,
+    prepared: HashMap<AgentKey, PreparedSession>,
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl Apple {
+    fn clean_session() -> Result<foundation_models::LanguageModelSession, String> {
+        let session = foundation_models::LanguageModelSession::with_instructions(INSTRUCTIONS)
+            .map_err(|error| error.to_string())?;
+        Ok(session)
+    }
+    fn prewarm(session: &foundation_models::LanguageModelSession) {
+        if let Err(error) = session.prewarm_with_prompt(PROMPT_PREFIX) {
+            tracing::debug!(%error, "Prefix prewarming unavailable; warming model only");
+            session.prewarm();
+        }
+    }
 }
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl Backend for Apple {
     fn available(&self) -> bool {
         foundation_models::SystemLanguageModel::is_available()
     }
-    async fn summarize(&mut self, input: &Input) -> Result<Summary, String> {
+    fn prepare(&mut self, agents: &HashSet<AgentKey>, immediate: &HashSet<AgentKey>) {
+        self.prepared.retain(|key, _| agents.contains(key));
+        for key in agents {
+            if !self.prepared.contains_key(key) {
+                // No artificial delay for completed items. Prewarm only ahead of demand.
+                match Self::clean_session() {
+                    Ok(session) => {
+                        self.prepared.insert(
+                            *key,
+                            PreparedSession {
+                                session,
+                                warmed: false,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "Unable to prepare agent summary session")
+                    }
+                }
+            }
+            if let Some(prepared) = self.prepared.get_mut(key)
+                && !prepared.warmed
+                && !immediate.contains(key)
+            {
+                Self::prewarm(&prepared.session);
+                prepared.warmed = true;
+            }
+        }
+    }
+    async fn summarize(&mut self, agent: AgentKey, input: &Input) -> Result<Summary, String> {
         use foundation_models::async_api::AsyncSession;
-        use foundation_models::{
-            GenerationOptions, LanguageModelSession, SamplingMode, SystemLanguageModel,
-        };
+        use foundation_models::{GenerationOptions, SamplingMode, SystemLanguageModel};
         if self.schema.is_none() {
             self.schema = Some(summary_schema()?);
         }
         let schema = self.schema.as_ref().expect("compiled summary schema");
-        let instructions = input.instructions();
+        let instructions = INSTRUCTIONS;
         let mut budget = INPUT_BYTES;
         let context = match SystemLanguageModel::context_size() {
             0 => 4096,
@@ -662,10 +740,14 @@ impl Backend for Apple {
             }
         }
         for attempt in 0..2 {
-            self.session = Some(
-                LanguageModelSession::with_instructions(&instructions)
-                    .map_err(|error| error.to_string())?,
-            );
+            self.session = Some(if attempt == 0 {
+                match self.prepared.remove(&agent) {
+                    Some(prepared) => prepared.session,
+                    None => Self::clean_session()?,
+                }
+            } else {
+                Self::clean_session()?
+            });
             let session = self.session.as_ref().expect("created summary session");
             let reply = AsyncSession::new(session)
                 .respond_generating(
@@ -724,7 +806,7 @@ impl Backend for Apple {
     fn available(&self) -> bool {
         false
     }
-    async fn summarize(&mut self, _: &Input) -> Result<Summary, String> {
+    async fn summarize(&mut self, _: AgentKey, _: &Input) -> Result<Summary, String> {
         Err("Apple model unavailable".into())
     }
     async fn settle(&mut self) -> bool {
@@ -741,6 +823,7 @@ impl App {
             return;
         };
         let mut jobs = Vec::new();
+        let mut agents = HashSet::new();
         if self.agent_feed.semantic_available {
             if let Some(root) = self.agent_feed.root {
                 if let Some(feed) = self
@@ -756,6 +839,7 @@ impl App {
                         .copied()
                         .filter(|id| feed.card_visible(*id, now))
                         .collect();
+                    agents.extend(visible.iter().map(|agent| (root, *agent)));
                     for (agent, window) in &mut feed.windows {
                         if !visible.contains(agent) {
                             continue;
@@ -774,8 +858,7 @@ impl App {
                                 root,
                                 agent: *agent,
                                 revision: window.revision,
-                                ready: (window.changed.unwrap_or_else(Instant::now) + DEBOUNCE)
-                                    .into(),
+                                ready: window.changed.unwrap_or_else(Instant::now).into(),
                                 input,
                             });
                         }
@@ -785,10 +868,13 @@ impl App {
         }
         jobs.sort_by_key(|job| job.agent.to_string());
         client.desired.send_if_modified(|old| {
-            if old.len() == jobs.len() && old.iter().zip(&jobs).all(|(a, b)| a.same(b)) {
+            if old.agents == agents
+                && old.jobs.len() == jobs.len()
+                && old.jobs.iter().zip(&jobs).all(|(a, b)| a.same(b))
+            {
                 false
             } else {
-                *old = jobs;
+                *old = Work { jobs, agents };
                 true
             }
         });

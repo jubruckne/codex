@@ -80,7 +80,15 @@ not guarantee that every newer frontend RPC is supported by an older service.
   turn-start timestamps conservatively, so recent output inside a long-running
   older turn can be omitted when item-level timing is unavailable. Inference runs
   asynchronously with serialized requests, cancellation, input-hash caching and
-  stale-result rejection, including lifecycle changes. Startup unavailability
+  stale-result rejection, including lifecycle changes. Completed assistant messages
+  and public reasoning items trigger inference immediately; streaming fragments do
+  not. Turn completion also triggers an immediate final summary, without debounce.
+  A clean prepared session per visible subagent prewarms the fixed instructions
+  and prompt prefix ahead of demand. Used sessions are discarded and replenished
+  with fresh prewarmed sessions, so prior outputs never become conversation context.
+  Already-ready jobs run without waiting for prewarming; sessions are released when
+  their agents leave the active view. Lifecycle wording follows the stable prefix
+  in each request, rather than changing the cached system instructions. Startup unavailability
   disables semantic summaries and keeps the latest response/thinking excerpt;
   there is no cloud fallback.
 - Fullscreen contextual feedback and Find/reverse-search queries share the gap

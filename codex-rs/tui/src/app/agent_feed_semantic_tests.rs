@@ -138,6 +138,7 @@ struct Counts {
     active: AtomicUsize,
     maximum: AtomicUsize,
     started: AtomicUsize,
+    retained: std::sync::Mutex<HashSet<AgentKey>>,
     cancelled: AtomicUsize,
 }
 struct Guard {
@@ -162,7 +163,10 @@ impl Backend for Fake {
     fn available(&self) -> bool {
         self.available
     }
-    async fn summarize(&mut self, input: &Input) -> Result<Summary, String> {
+    fn prepare(&mut self, agents: &HashSet<AgentKey>, _: &HashSet<AgentKey>) {
+        *self.counts.retained.lock().unwrap() = agents.clone();
+    }
+    async fn summarize(&mut self, _: AgentKey, input: &Input) -> Result<Summary, String> {
         self.counts.started.fetch_add(1, Ordering::SeqCst);
         let active = self.counts.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.counts.maximum.fetch_max(active, Ordering::SeqCst);
@@ -196,7 +200,7 @@ fn fake(available: bool) -> (Fake, tokio::sync::mpsc::UnboundedReceiver<()>, Arc
 #[tokio::test(start_paused = true)]
 async fn semantic_worker_cancels_superseded_requests_serializes_and_caches() {
     let (backend, mut started, counts) = fake(true);
-    let (tx, rx) = watch::channel(vec![job(1, "obsolete")]);
+    let (tx, rx) = watch::channel(Work::from(vec![job(1, "obsolete")]));
     let (events, mut results) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(worker(backend, rx, move |event| {
         let _ = events.send(event);
@@ -206,7 +210,7 @@ async fn semantic_worker_cancels_superseded_requests_serializes_and_caches() {
         Some(Event::Availability(true))
     ));
     started.recv().await.unwrap();
-    tx.send_replace(vec![job(2, "newest")]);
+    tx.send_replace(Work::from(vec![job(2, "newest")]));
     started.recv().await.unwrap();
     match results.recv().await.unwrap() {
         Event::Finished {
@@ -219,7 +223,7 @@ async fn semantic_worker_cancels_superseded_requests_serializes_and_caches() {
     }
     assert_eq!(counts.cancelled.load(Ordering::SeqCst), 1);
     assert_eq!(counts.maximum.load(Ordering::SeqCst), 1);
-    tx.send_replace(vec![job(3, "newest")]);
+    tx.send_replace(Work::from(vec![job(3, "newest")]));
     assert!(matches!(
         results.recv().await,
         Some(Event::Finished { revision: 3, .. })
@@ -229,7 +233,7 @@ async fn semantic_worker_cancels_superseded_requests_serializes_and_caches() {
     let first = job(4, "first agent");
     let mut other = job(4, "other agent");
     other.agent = ThreadId::from_u128(3);
-    tx.send_replace(vec![first, other]);
+    tx.send_replace(Work::from(vec![first, other]));
     for _ in 0..2 {
         assert!(matches!(results.recv().await, Some(Event::Finished { .. })));
     }
@@ -241,18 +245,18 @@ async fn semantic_worker_cancels_superseded_requests_serializes_and_caches() {
 async fn semantic_worker_coalesces_pending_updates_and_cancels_on_root_change() {
     let (backend, mut started, counts) = fake(true);
     let mut pending = job(1, "old");
-    pending.ready += DEBOUNCE;
-    let (tx, rx) = watch::channel(vec![pending]);
+    pending.ready += Duration::from_millis(750);
+    let (tx, rx) = watch::channel(Work::from(vec![pending]));
     let (events, mut results) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(worker(backend, rx, move |event| {
         let _ = events.send(event);
     }));
     results.recv().await.unwrap();
     let mut newest = job(3, "latest pending");
-    newest.ready += DEBOUNCE;
-    tx.send_replace(vec![newest]);
+    newest.ready += Duration::from_millis(750);
+    tx.send_replace(Work::from(vec![newest]));
     started.recv().await.unwrap();
-    tx.send_replace(Vec::new());
+    tx.send_replace(Work::from(Vec::new()));
     tokio::task::yield_now().await;
     assert_eq!(counts.cancelled.load(Ordering::SeqCst), 1);
     assert_eq!(counts.started.load(Ordering::SeqCst), 1);
@@ -263,7 +267,7 @@ async fn semantic_worker_coalesces_pending_updates_and_cancels_on_root_change() 
 #[tokio::test]
 async fn semantic_unavailable_backend_stops_without_inference() {
     let (backend, _, counts) = fake(false);
-    let (_tx, rx) = watch::channel(vec![job(1, "data")]);
+    let (_tx, rx) = watch::channel(Work::from(vec![job(1, "data")]));
     let events = std::cell::RefCell::new(Vec::new());
     worker(backend, rx, |event| events.borrow_mut().push(event)).await;
     assert!(matches!(
@@ -389,6 +393,12 @@ async fn semantic_apple_model_smoke() {
     if !backend.available() {
         return;
     }
+    let key = (ThreadId::from_u128(1), ThreadId::from_u128(2));
+    let other = (key.0, ThreadId::from_u128(3));
+    let retained = HashSet::from([key, other]);
+    backend.prepare(&retained, &HashSet::new());
+    assert_eq!(backend.prepared.len(), 2);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     for (label, text, unsupported) in [
         (
             "read-only recommendation",
@@ -410,11 +420,31 @@ async fn semantic_apple_model_smoke() {
         window.observe(&message(ThreadId::from_u128(2), 0, false, text));
         window.finish_turn("turn", TurnStatus::Completed);
         let data = window.input_for(false).unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(60), backend.summarize(&data))
-            .await
-            .unwrap()
-            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            backend.summarize((ThreadId::from_u128(1), ThreadId::from_u128(2)), &data),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(backend.settle().await);
+        backend.prepare(&retained, &HashSet::new());
+        assert_eq!(backend.prepared.len(), 2);
+        for prepared in backend.prepared.values() {
+            assert!(prepared.warmed);
+            assert!(
+                prepared
+                    .session
+                    .transcript()
+                    .unwrap()
+                    .entries()
+                    .iter()
+                    .all(|entry| matches!(
+                        entry,
+                        foundation_models::transcript::Entry::Instructions(_)
+                    ))
+            );
+        }
         assert!(result.text.split_whitespace().count() <= 40);
         assert!(result.caption.split_whitespace().count() <= 10);
         let output = format!("{} {}", result.text, result.caption).to_lowercase();
@@ -426,6 +456,8 @@ async fn semantic_apple_model_smoke() {
         }
         eprintln!("{label}: {}\nCaption: {}", result.text, result.caption);
     }
+    backend.prepare(&HashSet::new(), &HashSet::new());
+    assert!(backend.prepared.is_empty());
 }
 
 #[test]
@@ -556,7 +588,7 @@ async fn semantic_worker_rejects_expired_jobs_and_cancels_at_source_expiry() {
     let mut expired = job(1, "expired before inference");
     Arc::get_mut(&mut expired.input).unwrap().expires_at_ms =
         chrono::Utc::now().timestamp_millis() - 1;
-    let (tx, rx) = watch::channel(vec![expired]);
+    let (tx, rx) = watch::channel(Work::from(vec![expired]));
     let (events, mut results) = tokio::sync::mpsc::unbounded_channel();
     let task = tokio::spawn(worker(backend, rx, move |event| {
         let _ = events.send(event);
@@ -570,7 +602,7 @@ async fn semantic_worker_rejects_expired_jobs_and_cancels_at_source_expiry() {
     let mut brief = job(2, "expires during inference");
     Arc::get_mut(&mut brief.input).unwrap().expires_at_ms =
         chrono::Utc::now().timestamp_millis() + 10_000;
-    tx.send_replace(vec![brief]);
+    tx.send_replace(Work::from(vec![brief]));
     started.recv().await.unwrap();
     tokio::time::advance(Duration::from_secs(11)).await;
     tokio::task::yield_now().await;
@@ -924,4 +956,187 @@ fn semantic_idle_final_report_supersedes_earlier_reasoning_and_plans() {
         "Late delivery of an old speculative idea.",
     ));
     assert_eq!(window.input_for(false).unwrap().hash, hash);
+}
+
+#[test]
+fn semantic_active_input_waits_for_item_completion_and_ignores_partial_fragments() {
+    let agent = ThreadId::from_u128(2);
+    let mut window = source_window();
+    let mut reasoning = message(agent, 1, true, "I'm inspecting the parser.");
+    reasoning.complete = false;
+    window.observe(&reasoning);
+    assert!(window.input_for(true).is_none());
+    reasoning.complete = true;
+    window.observe(&reasoning);
+    let first = window.input_for(true).unwrap();
+    let mut response = message(agent, 2, false, "I found");
+    response.complete = false;
+    window.observe(&response);
+    assert_eq!(window.input_for(true).unwrap().hash, first.hash);
+    response.text.push_str(" a parser bug.");
+    window.observe(&response);
+    assert_eq!(window.input_for(true).unwrap().hash, first.hash);
+    response.complete = true;
+    window.observe(&response);
+    let completed = window.input_for(true).unwrap();
+    assert_ne!(completed.hash, first.hash);
+    assert_eq!(completed.entries.len(), 2);
+    window.finish_turn("turn", TurnStatus::Completed);
+    let finished = window.input_for(false).unwrap();
+    assert_ne!(finished.hash, completed.hash);
+    assert_eq!(finished.entries.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn semantic_worker_retains_preparation_targets_between_items_and_releases_removed_agents() {
+    let (backend, mut started, counts) = fake(true);
+    let one = (ThreadId::from_u128(1), ThreadId::from_u128(2));
+    let two = (one.0, ThreadId::from_u128(3));
+    let agents = HashSet::from([one, two]);
+    let (tx, rx) = watch::channel(Work {
+        jobs: vec![],
+        agents: agents.clone(),
+    });
+    let (events, mut results) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(worker(backend, rx, move |event| {
+        let _ = events.send(event);
+    }));
+    assert!(matches!(
+        results.recv().await,
+        Some(Event::Availability(true))
+    ));
+    tokio::task::yield_now().await;
+    assert_eq!(*counts.retained.lock().unwrap(), agents);
+    tx.send_replace(Work {
+        jobs: vec![job(1, "completed item")],
+        agents: agents.clone(),
+    });
+    started.recv().await.unwrap();
+    assert!(matches!(results.recv().await, Some(Event::Finished { .. })));
+    tx.send_replace(Work {
+        jobs: vec![],
+        agents: agents.clone(),
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(*counts.retained.lock().unwrap(), agents);
+    tx.send_replace(Work {
+        jobs: vec![],
+        agents: HashSet::from([two]),
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(*counts.retained.lock().unwrap(), HashSet::from([two]));
+    tx.send_replace(Work::default());
+    tokio::task::yield_now().await;
+    assert!(counts.retained.lock().unwrap().is_empty());
+    drop(tx);
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn semantic_item_completed_and_turn_completed_schedule_without_debounce() {
+    use crate::app::agents_overview::tests::overview_thread;
+    use crate::app::tests::make_test_app_with_channels;
+    use codex_app_server_protocol::{
+        AgentMessageDeltaNotification, ItemCompletedNotification, ItemStartedNotification,
+        ThreadStatus, Turn, TurnCompletedNotification, TurnItemsView,
+    };
+    let (mut app, _, _) = make_test_app_with_channels().await;
+    let root = ThreadId::from_u128(1);
+    let agent = ThreadId::from_u128(2);
+    app.primary_thread_id = Some(root);
+    app.active_thread_id = Some(root);
+    app.local_settings.tui.fullscreen_transcript = true;
+    app.agent_feed.semantic_available = true;
+    app.agents_overview.threads.insert(
+        agent,
+        Some(overview_thread(
+            agent,
+            Some(root),
+            "Worker",
+            ThreadStatus::Active {
+                active_flags: vec![],
+            },
+        )),
+    );
+    app.sync_agent_feed_root();
+    app.agent_feed
+        .roots
+        .get_mut(&root)
+        .unwrap()
+        .windows
+        .entry(agent)
+        .or_default()
+        .start_turn("turn");
+    let (tx, rx) = watch::channel(Work::default());
+    app.agent_feed.summarizer = Some(Client { desired: tx });
+    let reasoning = ThreadItem::Reasoning {
+        id: "r".into(),
+        summary: vec!["I'm inspecting the parser.".into()],
+        content: vec![],
+    };
+    app.observe_agent_feed(&ServerNotification::ItemStarted(ItemStartedNotification {
+        thread_id: agent.to_string(),
+        turn_id: "turn".into(),
+        item: reasoning.clone(),
+        started_at_ms: chrono::Utc::now().timestamp_millis(),
+    }));
+    assert!(rx.borrow().jobs.is_empty());
+    assert!(rx.borrow().agents.contains(&(root, agent)));
+    app.observe_agent_feed(&ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            completed_at_ms: chrono::Utc::now().timestamp_millis(),
+            thread_id: agent.to_string(),
+            turn_id: "turn".into(),
+            item: reasoning,
+        },
+    ));
+    assert_eq!(rx.borrow().jobs.len(), 1);
+    assert!(rx.borrow().jobs[0].ready <= tokio::time::Instant::now());
+    let first = rx.borrow().jobs[0].input.hash;
+    app.observe_agent_feed(&ServerNotification::AgentMessageDelta(
+        AgentMessageDeltaNotification {
+            thread_id: agent.to_string(),
+            turn_id: "turn".into(),
+            item_id: "m".into(),
+            delta: "I identified".into(),
+        },
+    ));
+    assert_eq!(rx.borrow().jobs[0].input.hash, first);
+    app.observe_agent_feed(&ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            completed_at_ms: chrono::Utc::now().timestamp_millis(),
+            thread_id: agent.to_string(),
+            turn_id: "turn".into(),
+            item: ThreadItem::AgentMessage {
+                id: "m".into(),
+                text: "I identified a parser bug.".into(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            },
+        },
+    ));
+    let completed = rx.borrow().jobs[0].input.hash;
+    assert_ne!(completed, first);
+    assert!(rx.borrow().jobs[0].ready <= tokio::time::Instant::now());
+    app.observe_agent_feed(&ServerNotification::TurnCompleted(
+        TurnCompletedNotification {
+            thread_id: agent.to_string(),
+            turn: Turn {
+                id: "turn".into(),
+                root_turn_id: None,
+                items_view: TurnItemsView::Full,
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                items: vec![],
+            },
+        },
+    ));
+    assert_ne!(rx.borrow().jobs[0].input.hash, completed);
+    assert!(rx.borrow().jobs[0].ready <= tokio::time::Instant::now());
+    assert_eq!(rx.borrow().jobs[0].input.status, TurnStatus::Completed);
 }
