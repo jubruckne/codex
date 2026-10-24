@@ -43,7 +43,7 @@ not guarantee that every newer frontend RPC is supported by an older service.
   session positions and sizes. Drag a title to move, side/bottom borders to resize,
   and click to bring forward. New windows start collapsed until summary/fallback
   text is ready, then expand automatically. Explicit collapse/expand choices take
-  precedence. **▲** collapses to title and status; **▼** expands.
+  precedence. **▲** collapses to title and a one-line caption; **▼** expands.
   **F6** toggles all windows. The title carries a status glyph (spinner while working, ○ idle, ? approval, ◇ input, ! error); reported
   tokens sit in the bottom border. All eleven
   interior rows are available for summary text. Animation settings are respected.
@@ -66,7 +66,10 @@ not guarantee that every newer frontend RPC is supported by an older service.
   The former three-response quota is replaced by bounded turn input (32 source
   entries and a model-context byte budget), retaining the 15-minute source cutoff.
   The prompt requests 30–40 words total in first person, in one or two short
-  paragraphs. It prioritizes the latest explicit
+  paragraphs, plus a separate single-sentence caption of at most ten words for
+  collapsed windows in place of status text. Both are generated in one request
+  and replaced together after validation; no caption placeholder is shown.
+  It prioritizes the latest explicit
   report, distinguishes research/proposals from implementation/verification, and
   omits unsupported plans or blockers. Sparse evidence may yield fewer words.
   Live source updates use received event times; historical entries use available

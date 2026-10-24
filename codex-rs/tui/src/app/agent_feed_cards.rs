@@ -236,7 +236,12 @@ impl RootFeed {
         let width = card.width.saturating_sub(inset * 2);
         if collapsed {
             crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
-                Line::from(label).fg(accent),
+                Line::from(if self.semantic {
+                    self.captions.get(&agent).cloned().unwrap_or_default()
+                } else {
+                    label.to_owned()
+                })
+                .fg(accent),
                 usize::from(width),
             )
             .render(Rect::new(card.x + inset, card.y + 1, width, 1), buf);
@@ -261,7 +266,7 @@ impl RootFeed {
                     width,
                     cwd.to_path_buf(),
                     crate::wrapping::word_wrap_lines(
-                        [Line::from(summary.text.clone())],
+                        summary.text.lines().map(|line| Line::from(line.to_owned())),
                         usize::from(width),
                     ),
                 ));

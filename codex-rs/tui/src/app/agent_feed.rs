@@ -44,6 +44,7 @@ struct Message {
 pub(super) struct RootFeed {
     windows: HashMap<ThreadId, semantic::Window>,
     bubbles: Vec<Message>,
+    captions: HashMap<ThreadId, String>,
     published: HashMap<ThreadId, [u8; 32]>,
     semantic: bool,
     cards: HashMap<ThreadId, cards::CardState>,

@@ -524,3 +524,35 @@ fn agent_cards_use_all_eleven_interior_rows_and_show_state_in_the_title() {
         assert!(!output.lines().nth(11).unwrap().contains("Working"));
     }
 }
+
+#[test]
+fn agent_cards_collapsed_semantic_window_shows_caption_instead_of_status() {
+    let mut feed = feed();
+    feed.semantic = true;
+    let id = ThreadId::from_u128(2);
+    feed.captions.insert(id, "I finished the research.".into());
+    let area = Rect::new(0, 0, 45, 3);
+    let mut buf = Buffer::empty(area);
+    feed.render_agent_card(id, area, true, &mut buf, Path::new("/tmp"));
+    let output = text(&buf);
+    assert!(
+        output
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains("I finished the research.")
+    );
+    assert!(!output.contains("Idle"));
+    feed.captions.clear();
+    let mut empty = Buffer::empty(area);
+    feed.render_agent_card(id, area, true, &mut empty, Path::new("/tmp"));
+    assert!(!text(&empty).contains("Idle"));
+    assert!(
+        text(&empty)
+            .lines()
+            .nth(1)
+            .unwrap()
+            .trim_matches(['│', ' '])
+            .is_empty()
+    );
+}

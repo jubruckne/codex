@@ -14,6 +14,12 @@ fn message(agent: ThreadId, index: u64, reasoning: bool, text: &str) -> Message 
         rendered: Default::default(),
     }
 }
+fn summary(text: &str) -> Summary {
+    Summary {
+        text: text.into(),
+        caption: "I finished the research.".into(),
+    }
+}
 fn source_window() -> Window {
     let mut window = Window::default();
     window.finish_turn("turn", TurnStatus::Completed);
@@ -156,7 +162,7 @@ impl Backend for Fake {
     fn available(&self) -> bool {
         self.available
     }
-    async fn summarize(&mut self, input: &Input) -> Result<String, String> {
+    async fn summarize(&mut self, input: &Input) -> Result<Summary, String> {
         self.counts.started.fetch_add(1, Ordering::SeqCst);
         let active = self.counts.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.counts.maximum.fetch_max(active, Ordering::SeqCst);
@@ -167,7 +173,7 @@ impl Backend for Fake {
         let _ = self.started.send(());
         tokio::time::sleep(self.delay).await;
         guard.completed = true;
-        Ok(input.entries.last().unwrap().text.clone())
+        Ok(summary(&input.entries.last().unwrap().text))
     }
     async fn settle(&mut self) -> bool {
         true
@@ -207,7 +213,7 @@ async fn semantic_worker_cancels_superseded_requests_serializes_and_caches() {
             revision, result, ..
         } => {
             assert_eq!(revision, 2);
-            assert_eq!(result.unwrap(), "newest");
+            assert_eq!(result.unwrap().text, "newest");
         }
         _ => panic!("expected completion"),
     }
@@ -299,7 +305,7 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
         agent,
         revision: old,
         hash: old_hash,
-        result: Ok("stale".into()),
+        result: Ok(summary("stale")),
     });
     assert!(app.agent_feed.roots[&root].bubbles.is_empty());
     let window = app
@@ -317,7 +323,7 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
         agent,
         revision,
         hash,
-        result: Ok("wrong root".into()),
+        result: Ok(summary("wrong root")),
     });
     for _ in 0..2 {
         app.apply_agent_feed_semantic(Event::Finished {
@@ -325,7 +331,9 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
             agent,
             revision,
             hash,
-            result: Ok("Completed the parser fix. Next it will run focused tests.".into()),
+            result: Ok(summary(
+                "Completed the parser fix. Next it will run focused tests.",
+            )),
         });
     }
     let feed = &app.agent_feed.roots[&root];
@@ -355,7 +363,9 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
         agent,
         revision,
         hash,
-        result: Ok("The focused tests passed. Next it will review the change.".into()),
+        result: Ok(summary(
+            "The focused tests passed. Next it will review the change.",
+        )),
     });
     let feed = &app.agent_feed.roots[&root];
     assert_eq!(feed.bubbles.len(), 1);
@@ -380,15 +390,19 @@ async fn semantic_apple_model_smoke() {
         return;
     }
     let data = input(
-        "The agent fixed a parser bug and added regression coverage. Focused tests passed. It is investigating a remaining Windows path failure; it plans to reproduce that failure and fix path normalization next. It has not run the full suite or merged the changes.",
+        "I finished read-only source research. I identified existing tool-result fields and proposed bounded evidence records for a future frontend change. I did not implement the design, edit files, or run tests. My report is ready for integration planning.",
     );
     let result = tokio::time::timeout(Duration::from_secs(60), backend.summarize(&data))
         .await
         .unwrap()
         .unwrap();
     assert!(backend.settle().await);
-    assert!(!result.is_empty());
-    eprintln!("Local summary: {result}");
+    assert!(!result.text.is_empty());
+    assert!(!result.caption.is_empty());
+    eprintln!(
+        "Local summary: {}\nCaption: {}",
+        result.text, result.caption
+    );
 }
 
 #[test]
@@ -696,6 +710,7 @@ async fn semantic_turn_started_notification_changes_focus_before_any_model_outpu
     feed.bubbles
         .push(message(agent, 99, false, "Previous turn summary."));
     feed.published.insert(agent, previous);
+    feed.captions.insert(agent, "Previous caption.".into());
     app.observe_agent_feed(&ServerNotification::TurnStarted(TurnStartedNotification {
         thread_id: agent.to_string(),
         turn: Turn {
@@ -733,7 +748,7 @@ async fn semantic_turn_started_notification_changes_focus_before_any_model_outpu
         agent,
         revision: previous_revision,
         hash: previous,
-        result: Ok("Obsolete previous-turn generation.".into()),
+        result: Ok(summary("Obsolete previous-turn generation.")),
     });
     assert_eq!(
         app.agent_feed.roots[&root].bubbles[0].text,
@@ -758,11 +773,27 @@ async fn semantic_turn_started_notification_changes_focus_before_any_model_outpu
         agent,
         revision,
         hash: current.hash,
-        result: Ok("New turn summary.".into()),
+        result: Err("Invalid local summary or caption".into()),
+    });
+    assert_eq!(
+        app.agent_feed.roots[&root].bubbles[0].text,
+        "Previous turn summary."
+    );
+    assert_eq!(
+        app.agent_feed.roots[&root].captions[&agent],
+        "Previous caption."
+    );
+    app.apply_agent_feed_semantic(Event::Finished {
+        root,
+        agent,
+        revision,
+        hash: current.hash,
+        result: Ok(summary("New turn summary.")),
     });
     let feed = &app.agent_feed.roots[&root];
     assert_eq!(feed.bubbles.len(), 1);
     assert_eq!(feed.bubbles[0].text, "New turn summary.");
+    assert_eq!(feed.captions[&agent], "I finished the research.");
     assert_eq!(feed.published.get(&agent), Some(&current.hash));
 }
 
@@ -788,4 +819,28 @@ fn semantic_summary_preserves_two_paragraphs_and_normalizes_wrapped_lines() {
         "I finished read-only research.\n\nI have not changed files. Tests were not run."
     );
     assert_eq!(normalize_summary(" \n\t"), "");
+}
+
+#[test]
+fn semantic_parses_summary_and_caption_together_and_rejects_partial_results() {
+    let raw = serde_json::json!({
+        "summary": "I finished read-only research.\n\nI have not changed files.",
+        "caption": "I finished  read-only\nresearch.",
+    })
+    .to_string();
+    let result = parse_summary(&raw).unwrap();
+    assert_eq!(
+        result.text,
+        "I finished read-only research.\n\nI have not changed files."
+    );
+    assert_eq!(result.caption, "I finished read-only research.");
+    assert_eq!(parse_summary(&format!("```json\n{raw}\n```")), Ok(result));
+    for bad in [
+        "not json",
+        r#"{"summary":"Done"}"#,
+        r#"{"summary":"Done","caption":" "}"#,
+        r#"{"summary":" ","caption":"Done."}"#,
+    ] {
+        assert!(parse_summary(bad).is_err());
+    }
 }
