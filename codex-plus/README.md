@@ -38,14 +38,14 @@ not guarantee that every newer frontend RPC is supported by an older service.
 
 ## Custom behavior
 
-- Fullscreen subagent windows start at 11 lines and eight columns wider than the
+- Fullscreen subagent windows start at 10 lines and eight columns wider than the
   original quarter-width default, tile from the right, and retain
   session positions and sizes. Drag a title to move, side/bottom borders to resize,
   and click to bring forward. New windows start collapsed until summary/fallback
   text is ready, then expand automatically. Explicit collapse/expand choices take
   precedence. **▲** collapses to title and a one-line caption; **▼** expands.
   **F6** toggles all windows. The title carries a status glyph (spinner while working, ○ idle, ? approval, ◇ input, ! error); reported
-  tokens sit in the bottom border. All nine
+  tokens sit in the bottom border. All eight
   interior rows are available for summary text. Animation settings are respected.
   The composer and main status bar stay unobscured.
 - On resume, only agents actively generating are admitted to the floating view;

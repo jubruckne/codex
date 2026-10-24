@@ -441,8 +441,8 @@ mod tests {
     #[test]
     fn agent_windows_tile_down_right_and_preserve_hidden_agent_geometry() {
         let (mut windows, first, second) = windows();
-        assert_eq!(windows.states[&first].rect, Rect::new(112, 0, 48, 11));
-        assert_eq!(windows.states[&second].rect, Rect::new(112, 11, 48, 11));
+        assert_eq!(windows.states[&first].rect, Rect::new(112, 0, 48, 10));
+        assert_eq!(windows.states[&second].rect, Rect::new(112, 10, 48, 10));
         windows.states.get_mut(&first).unwrap().rect.x = 30;
         windows.states.get_mut(&first).unwrap().rect.height = 15;
         windows.sync(windows.viewport, &[second]);
@@ -458,18 +458,18 @@ mod tests {
         let before = windows.states[&first].rect;
         windows.sync(windows.viewport, &[newcomer, first, second]);
         assert_eq!(windows.states[&first].rect, before);
-        assert_eq!(windows.states[&newcomer].rect, Rect::new(112, 22, 48, 11));
+        assert_eq!(windows.states[&newcomer].rect, Rect::new(112, 20, 48, 10));
     }
     #[test]
     fn agent_windows_collapse_restore_height_and_capture_pointer_release() {
         let (mut windows, first, _) = windows();
         assert!(windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0)));
         assert_eq!(windows.states[&first].displayed().height, 3);
-        assert_eq!(windows.states[&first].rect.height, 11);
+        assert_eq!(windows.states[&first].rect.height, 10);
         assert!(windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 0, 39)));
         assert!(windows.gesture.is_none());
         windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0));
-        assert_eq!(windows.states[&first].displayed().height, 11);
+        assert_eq!(windows.states[&first].displayed().height, 10);
     }
     #[test]
     fn agent_windows_drag_resize_and_clamp_to_transcript_viewport() {
@@ -477,7 +477,7 @@ mod tests {
         windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0));
         windows.mouse(&event(MouseEventKind::Drag(MouseButton::Left), 10, 39));
         windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 10, 39));
-        assert_eq!(windows.states[&first].rect, Rect::new(0, 29, 48, 11));
+        assert_eq!(windows.states[&first].rect, Rect::new(0, 30, 48, 10));
         windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 47, 39));
         windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 159, 39));
         assert_eq!(windows.states[&first].rect.width, 160);
