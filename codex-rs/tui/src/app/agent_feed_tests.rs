@@ -238,6 +238,7 @@ async fn agent_feed_stale_snapshot_and_invalidation() {
     app.sync_agent_feed_root();
     let generation = app.agent_feed.generation;
     let snapshot = FeedSnapshot {
+        latest_turns: HashMap::new(),
         threads: vec![],
         messages: vec![],
         versions: HashMap::new(),
@@ -418,7 +419,13 @@ async fn agent_feed_history_rpc_is_passive_paged_and_recovers_messages() -> Resu
                             },
                         ],
                     };
-                    json!({"data":[turn],"nextCursor":null,"backwardsCursor":null})
+                    let mut newest = turn.clone();
+                    newest.id = "empty-latest-turn".into();
+                    newest.items.clear();
+                    newest.status = TurnStatus::InProgress;
+                    newest.started_at = Some(300);
+                    newest.completed_at = None;
+                    json!({"data":[newest,turn],"nextCursor":null,"backwardsCursor":null})
                 }
                 method => panic!("feed attempted unexpected RPC: {method}"),
             };
@@ -449,6 +456,13 @@ async fn agent_feed_history_rpc_is_passive_paged_and_recovers_messages() -> Resu
     let snapshot = io::load(&client.request_handle(), root, vec![], HashMap::new(), true).await;
     assert!(snapshot.errors.is_empty());
     assert_eq!(snapshot.messages.len(), 4);
+    assert_eq!(snapshot.latest_turns.len(), 2);
+    assert!(
+        snapshot
+            .latest_turns
+            .values()
+            .all(|turn| turn == "empty-latest-turn")
+    );
     assert_eq!(snapshot.threads.len(), 2);
     let (mut app, _, _) = make_test_app_with_channels().await;
     app.primary_thread_id = Some(root);
@@ -513,6 +527,7 @@ async fn agent_feed_root_changes_preserve_manual_choice_and_reject_other_root_re
         first,
         generation,
         FeedSnapshot {
+            latest_turns: HashMap::new(),
             threads: vec![],
             messages: vec![],
             versions: HashMap::new(),

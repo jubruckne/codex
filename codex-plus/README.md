@@ -59,7 +59,10 @@ not guarantee that every newer frontend RPC is supported by an older service.
   Manual F6 choices remain session-local.
 - On supported Macs, Apple Foundation Models summarize up to each agent's three
   latest assistant responses and intervening public reasoning summaries from the
-  last 15 minutes. The output is 40–60 words in the agent's first person. Live
+  last 15 minutes. Input explicitly separates previous turns (background) from the
+  latest turn (current focus), including newly started turns with no output yet.
+  Earlier plans must not be presented as current work. The output is 40–60 words
+  in the agent's first person, using plain language rather than code identifiers. Live
   source updates use their received event times; historical entries use available
   turn-start timestamps conservatively, so recent output inside a long-running
   older turn can be omitted when item-level timing is unavailable. Inference runs

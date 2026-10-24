@@ -268,6 +268,7 @@ impl Drop for AgentFeed {
 
 #[derive(Debug)]
 pub(crate) struct FeedSnapshot {
+    latest_turns: HashMap<ThreadId, String>,
     threads: Vec<Thread>,
     messages: Vec<(
         ThreadId,
@@ -500,6 +501,10 @@ impl App {
                     .or_insert(Some(thread));
             }
         }
+        for (agent, turn) in snapshot.latest_turns {
+            // A history request can finish after a newer live turn has started.
+            feed.windows.entry(agent).or_default().history_turn(turn);
+        }
         let mut chronology: HashMap<ThreadId, Vec<MessageKey>> = HashMap::new();
         for (id, turn, item, ..) in &snapshot.messages {
             chronology
@@ -562,6 +567,18 @@ impl App {
         }
         let feed = self.agent_feed.roots.entry(root).or_default();
         match notification {
+            ServerNotification::TurnStarted(event) => {
+                if let Ok(agent) = ThreadId::from_string(&event.thread_id)
+                    && feed.agents.contains_key(&agent)
+                {
+                    feed.windows
+                        .entry(agent)
+                        .or_default()
+                        .start_turn(&event.turn.id);
+                }
+                self.agent_feed.dirty = true;
+                return;
+            }
             ServerNotification::ReasoningSummaryTextDelta(delta) => {
                 if let Ok(id) = ThreadId::from_string(&delta.thread_id) {
                     feed.reasoning_delta(

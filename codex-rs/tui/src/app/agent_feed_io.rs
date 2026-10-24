@@ -12,6 +12,7 @@ pub(super) async fn load(
     read_messages: bool,
 ) -> FeedSnapshot {
     let mut snapshot = FeedSnapshot {
+        latest_turns: HashMap::new(),
         threads: known,
         messages: Vec::new(),
         versions: HashMap::new(),
@@ -100,7 +101,10 @@ pub(super) async fn load(
     .buffer_unordered(4);
     while let Some((id, version, result)) = reads.next().await {
         match result {
-            Ok(Ok(messages)) => {
+            Ok(Ok((messages, latest_turn))) => {
+                if let Some(turn) = latest_turn {
+                    snapshot.latest_turns.insert(id, turn);
+                }
                 snapshot.messages.extend(messages);
                 snapshot.versions.insert(id, version);
             }
@@ -126,7 +130,7 @@ type LoadedMessage = (
 async fn read_messages_for_thread(
     handle: &AppServerRequestHandle,
     id: ThreadId,
-) -> std::result::Result<Vec<LoadedMessage>, String> {
+) -> std::result::Result<(Vec<LoadedMessage>, Option<String>), String> {
     let page = handle
         .request_typed::<ThreadTurnsListResponse>(ClientRequest::ThreadTurnsList {
             request_id: RequestId::String(uuid::Uuid::new_v4().to_string()),
@@ -140,6 +144,7 @@ async fn read_messages_for_thread(
         })
         .await
         .map_err(|error| error.to_string())?;
+    let latest_turn = page.data.first().map(|turn| turn.id.clone());
     let mut messages = Vec::new();
     for turn in page.data.into_iter().rev() {
         let time = turn.started_at.unwrap_or(0).saturating_mul(1000);
@@ -166,5 +171,5 @@ async fn read_messages_for_thread(
             }
         }
     }
-    Ok(messages)
+    Ok((messages, latest_turn))
 }

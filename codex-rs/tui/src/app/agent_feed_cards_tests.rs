@@ -387,6 +387,7 @@ async fn agent_cards_delayed_metadata_cannot_resurrect_a_closed_agent() {
         root,
         app.agent_feed.generation,
         FeedSnapshot {
+            latest_turns: HashMap::new(),
             threads: vec![thread],
             messages: Vec::new(),
             versions: HashMap::new(),
