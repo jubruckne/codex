@@ -103,7 +103,7 @@ fn agent_feed_latest_response_card_renders_markdown_unicode_and_notice() {
     let mut buf = Buffer::empty(area);
     feed.render_agent_card(id, area, false, &mut buf, Path::new("/tmp"));
     let text = crate::app::owned_transcript::tests::buffer_text(&buf);
-    assert!(text.contains("╭ · ─ worker"));
+    assert!(text.contains("╭ · worker"));
     assert!(text.contains("worker"));
     assert!(text.contains("Done"));
     assert!(text.contains("Tests passed"));

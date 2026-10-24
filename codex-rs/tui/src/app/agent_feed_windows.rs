@@ -103,7 +103,7 @@ impl Windows {
             .collect();
         for (index, id) in agents.iter().enumerate() {
             self.states.entry(*id).or_insert_with(|| {
-                let width = (area.width / 4).max(30).saturating_add(6).min(area.width);
+                let width = (area.width / 4).max(30).saturating_add(8).min(area.width);
                 let height = DEFAULT_HEIGHT.min(area.height);
                 let rows = (area.height / height).max(1);
                 let columns = (area.width / width).max(1);
@@ -272,11 +272,7 @@ impl RootFeed {
         area: Rect,
         buf: &mut Buffer,
         cwd: &Path,
-        animation: Option<(
-            &crate::tui::FrameRequester,
-            crate::motion::MotionMode,
-            crate::motion::MotionMode,
-        )>,
+        animation: Option<(&crate::tui::FrameRequester, crate::motion::MotionMode)>,
     ) {
         let now = chrono::Utc::now().timestamp();
         let mut agents: Vec<_> = self
@@ -307,14 +303,8 @@ impl RootFeed {
                         .is_some_and(|state| state.label() == "Working")
                 })
             })
-            .map(|(requester, progress, shimmer)| {
-                if shimmer == crate::motion::MotionMode::Animated {
-                    requester.schedule_frame_in(Duration::from_millis(100));
-                }
-                (
-                    crate::motion::loading_glyph(started, progress, requester),
-                    shimmer,
-                )
+            .map(|(requester, progress)| {
+                crate::motion::loading_glyph(started, progress, requester)
             });
         for (id, window) in layout {
             self.render_agent_card_with_activity(
@@ -387,8 +377,8 @@ mod tests {
     #[test]
     fn agent_windows_tile_down_right_and_preserve_hidden_agent_geometry() {
         let (mut windows, first, second) = windows();
-        assert_eq!(windows.states[&first].rect, Rect::new(114, 0, 46, 12));
-        assert_eq!(windows.states[&second].rect, Rect::new(114, 12, 46, 12));
+        assert_eq!(windows.states[&first].rect, Rect::new(112, 0, 48, 13));
+        assert_eq!(windows.states[&second].rect, Rect::new(112, 13, 48, 13));
         windows.states.get_mut(&first).unwrap().rect.x = 30;
         windows.sync(windows.viewport, &[second]);
         assert!(!windows.order.contains(&first));
@@ -402,18 +392,18 @@ mod tests {
         let before = windows.states[&first].rect;
         windows.sync(windows.viewport, &[newcomer, first, second]);
         assert_eq!(windows.states[&first].rect, before);
-        assert_eq!(windows.states[&newcomer].rect, Rect::new(114, 24, 46, 12));
+        assert_eq!(windows.states[&newcomer].rect, Rect::new(112, 26, 48, 13));
     }
     #[test]
     fn agent_windows_collapse_restore_height_and_capture_pointer_release() {
         let (mut windows, first, _) = windows();
         assert!(windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0)));
         assert_eq!(windows.states[&first].displayed().height, 3);
-        assert_eq!(windows.states[&first].rect.height, 12);
+        assert_eq!(windows.states[&first].rect.height, 13);
         assert!(windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 0, 39)));
         assert!(windows.gesture.is_none());
         windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0));
-        assert_eq!(windows.states[&first].displayed().height, 12);
+        assert_eq!(windows.states[&first].displayed().height, 13);
     }
     #[test]
     fn agent_windows_drag_resize_and_clamp_to_transcript_viewport() {
@@ -421,8 +411,8 @@ mod tests {
         windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0));
         windows.mouse(&event(MouseEventKind::Drag(MouseButton::Left), 10, 39));
         windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 10, 39));
-        assert_eq!(windows.states[&first].rect, Rect::new(0, 28, 46, 12));
-        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 45, 39));
+        assert_eq!(windows.states[&first].rect, Rect::new(0, 27, 48, 13));
+        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 47, 39));
         windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 159, 39));
         assert_eq!(windows.states[&first].rect.width, 160);
         windows.sync(Rect::new(0, 0, 18, 8), &[first]);

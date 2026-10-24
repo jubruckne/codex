@@ -8,7 +8,7 @@ use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, BorderType};
 use sha2::{Digest, Sha256};
 
-pub(super) const CARD_HEIGHT: u16 = 12;
+pub(super) const CARD_HEIGHT: u16 = 13;
 const IDLE_SECONDS: i64 = 10 * 60;
 
 pub(super) struct CardState {
@@ -113,7 +113,7 @@ impl RootFeed {
         collapsed: bool,
         buf: &mut Buffer,
         cwd: &Path,
-        activity: Option<(&'static str, crate::motion::MotionMode)>,
+        activity: Option<&'static str>,
     ) {
         let mut card = card.intersection(buf.area);
         if collapsed {
@@ -126,7 +126,7 @@ impl RootFeed {
         let accent = color(agent);
         let state = self.cards.get(&agent);
         let label = state.map(CardState::label).unwrap_or("Unknown");
-        let (working, shimmer) = activity.unwrap_or(("◌", crate::motion::MotionMode::Reduced));
+        let working = activity.unwrap_or("◌");
         let glyph = match label {
             "Working" => working,
             "Awaiting approval" => "?",
@@ -186,18 +186,10 @@ impl RootFeed {
                 .unwrap_or(agent_name);
             let title_width = card.width.saturating_sub(6);
             if title_width > 0 {
-                let mut title = Line::from(format!(" {glyph} ─ "));
-                title.spans.extend(crate::motion::shimmer_text(
-                    basename,
-                    if label == "Working" {
-                        shimmer
-                    } else {
-                        crate::motion::MotionMode::Reduced
-                    },
-                ));
-                title.push_span(" ");
                 crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
-                    title.fg(accent).bold(),
+                    Line::from(format!(" {glyph} {basename} "))
+                        .fg(accent)
+                        .bold(),
                     usize::from(title_width),
                 )
                 .render(Rect::new(card.x + 1, card.y, title_width, 1), buf);
