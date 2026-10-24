@@ -1,10 +1,9 @@
 ---
 source: tui/src/app/agent_feed_cards_tests.rs
-assertion_line: 91
+assertion_line: 92
 expression: output
 ---
-╭ feed_reasoning ─────────────────────────▲─╮
-│                                           │
+╭ ○ ─ feed_reasoning ──────────────────── ▲ ╮
 │ The agent has completed detailed source   │
 │ checks and is investigating the remaining │
 │ display issue. Next it plans to run       │
@@ -13,10 +12,10 @@ expression: output
 │                                           │
 │                                           │
 │                                           │
-│ Idle                         ↑ 1.1k ↓ 300 │
-╰───────────────────────────────────────────╯
-╭ audit_scrollback_only ──────────────────▲─╮
 │                                           │
+│                                           │
+╰────────────────────────── ↑ 1.1k · ↓ 300 ─╯
+╭ ○ ─ audit_scrollback_only ───────────── ▲ ╮
 │ The agent has completed detailed source   │
 │ checks and is investigating the remaining │
 │ display issue. Next it plans to run       │
@@ -25,5 +24,6 @@ expression: output
 │                                           │
 │                                           │
 │                                           │
-│ Idle                         ↑ 1.1k ↓ 300 │
-╰───────────────────────────────────────────╯
+│                                           │
+│                                           │
+╰────────────────────────── ↑ 1.1k · ↓ 300 ─╯

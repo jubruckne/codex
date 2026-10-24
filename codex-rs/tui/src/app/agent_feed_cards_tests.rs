@@ -69,16 +69,17 @@ fn agent_cards_have_twelve_rows_stable_colors_and_right_aligned_reported_tokens(
         assert!(
             output
                 .lines()
-                .nth(usize::from(top + 10))
+                .nth(usize::from(top))
                 .unwrap()
-                .contains("Idle")
+                .contains("○ ─")
         );
+        assert!(!output.contains("Idle"));
         assert!(
             output
                 .lines()
-                .nth(usize::from(top + 10))
+                .nth(usize::from(top + 11))
                 .unwrap()
-                .contains("↑ 1.1k ↓ 300")
+                .contains("↑ 1.1k · ↓ 300")
         );
     }
     let id = ThreadId::from_u128(3);
@@ -122,7 +123,7 @@ fn agent_cards_collapse_to_status_only_and_clear_only_the_window_rectangle() {
     feed.render_agent_card(id, area, false, &mut expanded, Path::new("/tmp"));
     let output = text(&expanded);
     assert!(output.contains("completed detailed source"));
-    assert!(output.contains("↑ 1.1k ↓ 300"));
+    assert!(output.contains("↑ 1.1k · ↓ 300"));
     assert_eq!(expanded[(42, 0)].symbol(), "▲");
     let mut collapsed = Buffer::empty(area);
     for y in 0..area.height {
@@ -156,12 +157,13 @@ fn agent_cards_resize_summary_body_and_keep_unicode_titles_away_from_the_control
         feed.render_agent_card(id, area, false, &mut buf, Path::new("/tmp"));
         assert_eq!(buf[(21, 0)].symbol(), "▲");
         assert_eq!(buf[(23, height - 1)].symbol(), "╯");
+        assert!(text(&buf).lines().next().unwrap().contains("○ ─"));
         assert!(
             text(&buf)
                 .lines()
-                .nth(usize::from(height - 2))
+                .nth(usize::from(height - 1))
                 .unwrap()
-                .contains("Idle")
+                .contains('↑')
         );
     }
 }
@@ -179,8 +181,8 @@ fn agent_cards_bound_summaries_without_moving_footer_or_breaking_unicode() {
     );
     let buf = render(&feed, 27, 24);
     let output = text(&buf);
-    assert!(output.lines().nth(8).unwrap().contains('…'));
-    assert!(output.lines().nth(10).unwrap().contains("↑ 1.1k ↓ 300"));
+    assert!(output.lines().nth(10).unwrap().contains('…'));
+    assert!(output.lines().nth(11).unwrap().contains("↑ 1.1k · ↓ 300"));
     assert_eq!(buf[(26, 11)].symbol(), "╯");
     for width in 0..9 {
         for height in [0, 1, 11, 12, 24] {
@@ -330,13 +332,81 @@ fn agent_cards_hide_token_counters_until_reported_usage_is_available() {
     feed.cards.get_mut(&id).unwrap().tokens = None;
     let buf = render(&feed, 45, 24);
     let output = text(&buf);
-    let footer = output.lines().nth(10).unwrap();
-    assert!(footer.contains("Idle"));
+    let footer = output.lines().nth(11).unwrap();
+    assert!(footer.starts_with('╰') && footer.ends_with('╯'));
     assert!(!footer.contains('↑') && !footer.contains('↓'), "{footer}");
     feed.cards.get_mut(&id).unwrap().tokens = Some((0, 0));
     let buf = render(&feed, 45, 24);
-    assert!(text(&buf).lines().nth(10).unwrap().contains("↑ 0 ↓ 0"));
+    assert!(text(&buf).lines().nth(11).unwrap().contains("↑ 0 · ↓ 0"));
     feed.cards.get_mut(&id).unwrap().tokens = Some((1100, 300));
     let buf = render(&feed, 45, 24);
-    assert!(text(&buf).lines().nth(10).unwrap().contains("↑ 1.1k ↓ 300"));
+    assert!(
+        text(&buf)
+            .lines()
+            .nth(11)
+            .unwrap()
+            .contains("↑ 1.1k · ↓ 300")
+    );
+}
+
+#[test]
+fn agent_cards_use_all_ten_interior_rows_and_show_state_in_the_title() {
+    let mut feed = feed();
+    let id = ThreadId::from_u128(2);
+    // Use semantic plain text so markdown wrapping cannot introduce paragraph spacing.
+    feed.semantic = true;
+    feed.bubbles.push(Message {
+        key: MessageKey(id, "s".into(), "s".into()),
+        text: (1..=11)
+            .map(|i| format!("line{i:02}{}", "x".repeat(35)))
+            .collect::<Vec<_>>()
+            .join(" "),
+        complete: true,
+        live: true,
+        reasoning: false,
+        parts: Vec::new(),
+        order: (1, 1),
+        truncated: false,
+        rendered: Default::default(),
+    });
+    let buf = render(&feed, 45, 24);
+    let output = text(&buf);
+    assert!(output.lines().nth(1).unwrap().contains("line01"));
+    assert!(output.lines().nth(10).unwrap().contains("line10"));
+    assert!(output.lines().nth(10).unwrap().contains('…'));
+    for (status, glyph) in [
+        (ThreadStatus::Idle, "○"),
+        (ThreadStatus::SystemError, "!"),
+        (
+            ThreadStatus::Active {
+                active_flags: Vec::new(),
+            },
+            "◌",
+        ),
+        (
+            ThreadStatus::Active {
+                active_flags: vec![ThreadActiveFlag::WaitingOnApproval],
+            },
+            "?",
+        ),
+        (
+            ThreadStatus::Active {
+                active_flags: vec![ThreadActiveFlag::WaitingOnUserInput],
+            },
+            "◇",
+        ),
+    ] {
+        feed.cards.get_mut(&id).unwrap().status = status;
+        let buf = render(&feed, 45, 24);
+        let output = text(&buf);
+        assert!(
+            output
+                .lines()
+                .next()
+                .unwrap()
+                .contains(&format!("{glyph} ─")),
+            "{output}"
+        );
+        assert!(!output.lines().nth(10).unwrap().contains("Working"));
+    }
 }

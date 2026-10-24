@@ -120,6 +120,13 @@ impl App {
     ) -> Result<Rect> {
         let physical_size = screen_size;
         let windows_enabled = self.agent_windows_enabled(tui);
+        let window_requester = tui.frame_requester();
+        let window_progress = MotionMode::from_animations_enabled(
+            self.local_settings.tui.animations && self.local_settings.tui.effects.progress,
+        );
+        let window_shimmer = MotionMode::from_animations_enabled(
+            self.local_settings.tui.animations && self.local_settings.tui.effects.shimmer,
+        );
         self.chat_widget.sync_warnings(&self.transcript_cells);
         let motion = MotionMode::from_animations_enabled(
             self.local_settings.tui.animations && self.local_settings.tui.effects.shimmer,
@@ -406,7 +413,7 @@ impl App {
             chat_widget.note_rendered_width(screen_size.width);
             if windows_enabled && let Some(feed) = feed {
                 // Keep input, gap feedback and the persistent status bar unobscured.
-                feed.render_windows(Rect::new(0, 0, screen_size.width, bottom_area.y), frame.buffer, &self.config.cwd);
+                feed.render_windows(Rect::new(0, 0, screen_size.width, bottom_area.y), frame.buffer, &self.config.cwd, Some((&window_requester, window_progress, window_shimmer)));
             }
             let dialog = chat_widget.centered_dialog();
             let (foreground, foreground_area): (&dyn Renderable, Rect) =

@@ -332,7 +332,7 @@ async fn semantic_results_reject_stale_generations_and_roots_and_render_bubbles(
     let mut buf = Buffer::empty(area);
     feed.render_agent_card(agent, area, false, &mut buf, Path::new("/tmp"));
     let text = crate::app::owned_transcript::tests::buffer_text(&buf);
-    assert!(text.contains("╭ Worker"));
+    assert!(text.contains("╭ · ─ Worker"));
     assert!(text.contains("Completed the parser fix."));
     assert!(!text.contains("new reasoning"));
     insta::assert_snapshot!("semantic_agent_bubble", text);

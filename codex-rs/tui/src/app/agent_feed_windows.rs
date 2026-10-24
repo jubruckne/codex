@@ -15,6 +15,7 @@ pub(super) struct Windows {
     states: HashMap<ThreadId, Window>,
     order: Vec<ThreadId>,
     viewport: Rect,
+    animation_started: Option<Instant>,
     gesture: Option<Gesture>,
 }
 
@@ -102,7 +103,7 @@ impl Windows {
             .collect();
         for (index, id) in agents.iter().enumerate() {
             self.states.entry(*id).or_insert_with(|| {
-                let width = (area.width / 4).max(30).min(area.width);
+                let width = (area.width / 4).max(30).saturating_add(6).min(area.width);
                 let height = DEFAULT_HEIGHT.min(area.height);
                 let rows = (area.height / height).max(1);
                 let columns = (area.width / width).max(1);
@@ -266,7 +267,17 @@ impl Windows {
 }
 
 impl RootFeed {
-    pub(in crate::app) fn render_windows(&self, area: Rect, buf: &mut Buffer, cwd: &Path) {
+    pub(in crate::app) fn render_windows(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        cwd: &Path,
+        animation: Option<(
+            &crate::tui::FrameRequester,
+            crate::motion::MotionMode,
+            crate::motion::MotionMode,
+        )>,
+    ) {
         let now = chrono::Utc::now().timestamp();
         let mut agents: Vec<_> = self
             .agents
@@ -275,17 +286,45 @@ impl RootFeed {
             .filter(|id| self.card_visible(*id, now))
             .collect();
         agents.sort_by_key(|id| id.to_string());
-        let layout = {
+        let (layout, started) = {
             let mut windows = self.windows_ui.borrow_mut();
+            let started = *windows.animation_started.get_or_insert_with(Instant::now);
             windows.sync(area, &agents);
-            windows
-                .order
-                .iter()
-                .map(|id| (*id, windows.states[id]))
-                .collect::<Vec<_>>()
+            (
+                windows
+                    .order
+                    .iter()
+                    .map(|id| (*id, windows.states[id]))
+                    .collect::<Vec<_>>(),
+                started,
+            )
         };
+        let activity = animation
+            .filter(|_| {
+                layout.iter().any(|(id, _)| {
+                    self.cards
+                        .get(id)
+                        .is_some_and(|state| state.label() == "Working")
+                })
+            })
+            .map(|(requester, progress, shimmer)| {
+                if shimmer == crate::motion::MotionMode::Animated {
+                    requester.schedule_frame_in(Duration::from_millis(100));
+                }
+                (
+                    crate::motion::loading_glyph(started, progress, requester),
+                    shimmer,
+                )
+            });
         for (id, window) in layout {
-            self.render_agent_card(id, window.displayed(), window.collapsed, buf, cwd);
+            self.render_agent_card_with_activity(
+                id,
+                window.displayed(),
+                window.collapsed,
+                buf,
+                cwd,
+                activity,
+            );
         }
     }
 
@@ -348,8 +387,8 @@ mod tests {
     #[test]
     fn agent_windows_tile_down_right_and_preserve_hidden_agent_geometry() {
         let (mut windows, first, second) = windows();
-        assert_eq!(windows.states[&first].rect, Rect::new(120, 0, 40, 12));
-        assert_eq!(windows.states[&second].rect, Rect::new(120, 12, 40, 12));
+        assert_eq!(windows.states[&first].rect, Rect::new(114, 0, 46, 12));
+        assert_eq!(windows.states[&second].rect, Rect::new(114, 12, 46, 12));
         windows.states.get_mut(&first).unwrap().rect.x = 30;
         windows.sync(windows.viewport, &[second]);
         assert!(!windows.order.contains(&first));
@@ -363,7 +402,7 @@ mod tests {
         let before = windows.states[&first].rect;
         windows.sync(windows.viewport, &[newcomer, first, second]);
         assert_eq!(windows.states[&first].rect, before);
-        assert_eq!(windows.states[&newcomer].rect, Rect::new(120, 24, 40, 12));
+        assert_eq!(windows.states[&newcomer].rect, Rect::new(114, 24, 46, 12));
     }
     #[test]
     fn agent_windows_collapse_restore_height_and_capture_pointer_release() {
@@ -382,8 +421,8 @@ mod tests {
         windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0));
         windows.mouse(&event(MouseEventKind::Drag(MouseButton::Left), 10, 39));
         windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 10, 39));
-        assert_eq!(windows.states[&first].rect, Rect::new(0, 28, 40, 12));
-        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 39, 39));
+        assert_eq!(windows.states[&first].rect, Rect::new(0, 28, 46, 12));
+        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 45, 39));
         windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 159, 39));
         assert_eq!(windows.states[&first].rect.width, 160);
         windows.sync(Rect::new(0, 0, 18, 8), &[first]);

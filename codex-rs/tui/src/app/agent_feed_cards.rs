@@ -53,7 +53,7 @@ impl CardState {
                     .last_activity
                     .is_none_or(|time| now.saturating_sub(time) <= IDLE_SECONDS))
     }
-    fn label(&self) -> &'static str {
+    pub(super) fn label(&self) -> &'static str {
         match &self.status {
             ThreadStatus::Active { active_flags }
                 if active_flags.contains(&ThreadActiveFlag::WaitingOnApproval) =>
@@ -93,8 +93,7 @@ impl RootFeed {
             .get(&agent)
             .is_none_or(|state| state.visible(now))
     }
-    /// Paint one floating window, clearing only the rectangle it covers.
-    /// Window placement, stacking and pointer gestures belong to the window controller.
+    #[cfg(test)]
     pub(super) fn render_agent_card(
         &self,
         agent: ThreadId,
@@ -102,6 +101,19 @@ impl RootFeed {
         collapsed: bool,
         buf: &mut Buffer,
         cwd: &Path,
+    ) {
+        self.render_agent_card_with_activity(agent, card, collapsed, buf, cwd, None);
+    }
+
+    /// The borders carry state and usage; every interior row is available to the summary.
+    pub(super) fn render_agent_card_with_activity(
+        &self,
+        agent: ThreadId,
+        card: Rect,
+        collapsed: bool,
+        buf: &mut Buffer,
+        cwd: &Path,
+        activity: Option<(&'static str, crate::motion::MotionMode)>,
     ) {
         let mut card = card.intersection(buf.area);
         if collapsed {
@@ -112,43 +124,94 @@ impl RootFeed {
         }
         ratatui::widgets::Clear.render(card, buf);
         let accent = color(agent);
+        let state = self.cards.get(&agent);
+        let label = state.map(CardState::label).unwrap_or("Unknown");
+        let (working, shimmer) = activity.unwrap_or(("◌", crate::motion::MotionMode::Reduced));
+        let glyph = match label {
+            "Working" => working,
+            "Awaiting approval" => "?",
+            "Awaiting input" => "◇",
+            "Idle" => "○",
+            "Error" => "!",
+            "Closed" => "×",
+            _ => "·",
+        };
+        let usage = (!collapsed)
+            .then(|| state.and_then(|state| state.tokens))
+            .flatten()
+            .map(|(input, output)| {
+                Line::from(format!(
+                    " ↑ {} · ↓ {} ",
+                    crate::token_usage::compact_turn_tokens(input),
+                    crate::token_usage::compact_turn_tokens(output)
+                ))
+                .fg(accent)
+            })
+            .filter(|line| line.width() <= usize::from(card.width.saturating_sub(4)));
+        let usage_width = usage.as_ref().map_or(0, |line| line.width() as u16);
         let mut border = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(accent));
         if !collapsed && self.notice.is_some() {
-            border = border.title_bottom(Line::from(" Partial history ").dim());
+            let notice = if card.width.saturating_sub(usage_width + 4) >= 17 {
+                " Partial history "
+            } else {
+                " ! "
+            };
+            if card.width.saturating_sub(usage_width + 4) >= notice.len() as u16 {
+                border = border.title_bottom(Line::from(notice).dim());
+            }
         }
         border.render(card, buf);
+        if let Some(usage) = usage {
+            usage.render(
+                Rect::new(
+                    card.right() - usage_width - 2,
+                    card.bottom() - 1,
+                    usage_width,
+                    1,
+                ),
+                buf,
+            );
+        }
         if card.width >= 5 {
-            let label = self
+            let agent_name = self
                 .agents
                 .get(&agent)
                 .map(String::as_str)
                 .unwrap_or("Unknown");
-            let basename = label
+            let basename = agent_name
                 .rsplit('/')
                 .find(|part| !part.is_empty())
-                .unwrap_or(label);
-            let title_width = card.width.saturating_sub(7);
+                .unwrap_or(agent_name);
+            let title_width = card.width.saturating_sub(6);
             if title_width > 0 {
+                let mut title = Line::from(format!(" {glyph} ─ "));
+                title.spans.extend(crate::motion::shimmer_text(
+                    basename,
+                    if label == "Working" {
+                        shimmer
+                    } else {
+                        crate::motion::MotionMode::Reduced
+                    },
+                ));
+                title.push_span(" ");
                 crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
-                    Line::from(format!(" {basename} ")).fg(accent).bold(),
+                    title.fg(accent).bold(),
                     usize::from(title_width),
                 )
                 .render(Rect::new(card.x + 1, card.y, title_width, 1), buf);
             }
-            Line::from(if collapsed { "▼" } else { "▲" })
+            Line::from(if collapsed { " ▼ " } else { " ▲ " })
                 .fg(accent)
                 .bold()
-                .render(Rect::new(card.right() - 3, card.y, 1, 1), buf);
+                .render(Rect::new(card.right() - 4, card.y, 3, 1), buf);
         }
         if card.height < 3 || card.width < 3 {
             return;
         }
         let inset = if card.width >= 5 { 2 } else { 1 };
         let width = card.width.saturating_sub(inset * 2);
-        let state = self.cards.get(&agent);
-        let label = state.map(CardState::label).unwrap_or("Unknown");
         if collapsed {
             crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
                 Line::from(label).fg(accent),
@@ -210,7 +273,7 @@ impl RootFeed {
                 .dim(),
             );
         }
-        let rows = usize::from(card.height.saturating_sub(5));
+        let rows = usize::from(card.height.saturating_sub(2));
         if rows > 0 && lines.len() > rows {
             lines.truncate(rows);
             let last = lines.last_mut().unwrap();
@@ -223,41 +286,12 @@ impl RootFeed {
         Paragraph::new(lines).render(
             Rect::new(
                 card.x + inset,
-                card.y + 2,
+                card.y + 1,
                 width,
-                card.height.saturating_sub(5),
+                card.height.saturating_sub(2),
             ),
             buf,
         );
-        let usage = state
-            .and_then(|state| state.tokens)
-            .map(|(input, output)| {
-                format!(
-                    "↑ {} ↓ {}",
-                    crate::token_usage::compact_turn_tokens(input),
-                    crate::token_usage::compact_turn_tokens(output)
-                )
-            })
-            .unwrap_or_default();
-        let available = usize::from(width);
-        let usage_width = Line::from(usage.clone()).width();
-        let mut footer = if usage_width > 0 && usage_width + 1 < available {
-            let mut label = crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
-                Line::from(label),
-                available - usage_width - 1,
-            );
-            let gap = available.saturating_sub(label.width() + usage_width);
-            label.push_span(" ".repeat(gap));
-            label.push_span(usage);
-            label
-        } else {
-            crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
-                Line::from(label),
-                available,
-            )
-        };
-        footer = footer.fg(accent);
-        footer.render(Rect::new(card.x + inset, card.bottom() - 2, width, 1), buf);
     }
 }
 impl App {

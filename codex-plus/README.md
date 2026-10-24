@@ -38,10 +38,15 @@ not guarantee that every newer frontend RPC is supported by an older service.
 
 ## Custom behavior
 
-- Fullscreen subagent windows start at 12 lines, tile from the right, and retain
+- Fullscreen subagent windows start at 12 lines and six columns wider than the
+  original quarter-width default, tile from the right, and retain
   session positions and sizes. Drag a title to move, side/bottom borders to resize,
   and click to bring forward. **▲** collapses to title and status; **▼** expands.
-  **F6** toggles all windows. The composer and main status bar stay unobscured.
+  **F6** toggles all windows. The title carries a status glyph (spinner and subtle
+  name shimmer while working, ○ idle, ? approval, ◇ input, ! error); reported
+  tokens sit in the bottom border. All ten
+  interior rows are available for summary text. Animation settings are respected.
+  The composer and main status bar stay unobscured.
 - Closed, unloaded, archived and deleted agents are hidden. Idle/error agents
   disappear after ten minutes without activity; running/waiting agents remain.
   Empty resumed trees show no automatic windows, and unknown token counts stay

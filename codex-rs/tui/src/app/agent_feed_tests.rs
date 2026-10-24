@@ -103,7 +103,7 @@ fn agent_feed_latest_response_card_renders_markdown_unicode_and_notice() {
     let mut buf = Buffer::empty(area);
     feed.render_agent_card(id, area, false, &mut buf, Path::new("/tmp"));
     let text = crate::app::owned_transcript::tests::buffer_text(&buf);
-    assert!(text.contains("╭ worker"));
+    assert!(text.contains("╭ · ─ worker"));
     assert!(text.contains("worker"));
     assert!(text.contains("Done"));
     assert!(text.contains("Tests passed"));
@@ -467,7 +467,7 @@ async fn agent_feed_history_rpc_is_passive_paged_and_recovers_messages() -> Resu
     );
     let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);
-    feed.render_windows(area, &mut buf, Path::new("/tmp"));
+    feed.render_windows(area, &mut buf, Path::new("/tmp"), None);
     let rendered = crate::app::owned_transcript::tests::buffer_text(&buf);
     assert!(rendered.contains("Reply from"));
     assert!(!rendered.contains("Recovered thinking"));

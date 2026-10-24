@@ -3,8 +3,7 @@ source: tui/src/app/agent_feed_tests.rs
 assertion_line: 111
 expression: text
 ---
-╭ worker ────────────────────────────▲─╮
-│                                      │
+╭ · ─ worker ─────────────────────── ▲ ╮
 │ Done 🌻                               │
 │                                      │
 │ Tests passed                         │
@@ -13,5 +12,6 @@ expression: text
 │                                      │
 │                                      │
 │                                      │
-│ Unknown                              │
+│                                      │
+│                                      │
 ╰ Partial history ─────────────────────╯
