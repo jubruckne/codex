@@ -77,9 +77,12 @@ not guarantee that every newer frontend RPC is supported by an older service.
   report exists. Summaries over 40 words or captions over ten words are retried
   once, then rejected while the previous text remains visible. Sparse evidence may
   yield fewer words than the 30-word target.
-  Live source updates use received event times; historical entries use available
-  turn-start timestamps conservatively, so recent output inside a long-running
-  older turn can be omitted when item-level timing is unavailable. Inference runs
+  Live source updates use received event times. Running paginated turns recover
+  completed items and their timestamps through passive item-history reads; open
+  items remain excluded. Legacy history contains completed assistant/reasoning
+  events and can also trigger summaries before turn completion. Where item-level
+  timing is unavailable, turn-start timestamps are used conservatively, so recent
+  output inside a long-running older turn can be omitted. Inference runs
   asynchronously with serialized requests, cancellation, input-hash caching and
   stale-result rejection, including lifecycle changes. Completed assistant messages
   and public reasoning items trigger inference immediately; streaming fragments do

@@ -87,17 +87,23 @@ pub(super) async fn load(
             let id = ThreadId::from_string(&thread.id).ok()?;
             let active = matches!(thread.status, ThreadStatus::Active { .. });
             let version = (thread.updated_at, active);
-            (active || versions.get(&id) != Some(&version)).then_some((id, version))
+            (active || versions.get(&id) != Some(&version)).then_some((
+                id,
+                version,
+                thread.history_mode,
+            ))
         })
         .collect::<Vec<_>>();
-    let mut reads = stream::iter(pending.into_iter().map(|(id, version)| async move {
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            read_messages_for_thread(handle, id),
-        )
-        .await;
-        (id, version, result)
-    }))
+    let mut reads = stream::iter(pending.into_iter().map(
+        |(id, version, history_mode)| async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                read_messages_for_thread(handle, id, history_mode),
+            )
+            .await;
+            (id, version, result)
+        },
+    ))
     .buffer_unordered(4);
     while let Some((id, version, result)) = reads.next().await {
         match result {
@@ -128,6 +134,7 @@ type LoadedMessage = (
 async fn read_messages_for_thread(
     handle: &AppServerRequestHandle,
     id: ThreadId,
+    history_mode: ThreadHistoryMode,
 ) -> std::result::Result<(Vec<LoadedMessage>, semantic::TurnHistory), String> {
     let page = handle
         .request_typed::<ThreadTurnsListResponse>(ClientRequest::ThreadTurnsList {
@@ -157,8 +164,46 @@ async fn read_messages_for_thread(
     let mut messages = Vec::new();
     for turn in page.data.into_iter().rev() {
         let time = turn.started_at.unwrap_or(0).saturating_mul(1000);
-        let complete = turn.status != TurnStatus::InProgress;
-        for item in turn.items {
+        // Full turn items omit per-item lifecycle metadata. A running paginated
+        // turn can contain open items, so recover its bounded recent item page
+        // with authoritative completion timestamps instead of waiting for the turn.
+        let items = if turn.status == TurnStatus::InProgress
+            && history_mode == ThreadHistoryMode::Paginated
+        {
+            let mut page = handle
+                .request_typed::<ThreadItemsListResponse>(ClientRequest::ThreadItemsList {
+                    request_id: RequestId::String(uuid::Uuid::new_v4().to_string()),
+                    params: ThreadItemsListParams {
+                        thread_id: id.to_string(),
+                        turn_id: Some(turn.id.clone()),
+                        cursor: None,
+                        limit: Some(100),
+                        sort_direction: Some(SortDirection::Desc),
+                    },
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            page.data.reverse();
+            page.data
+                .into_iter()
+                .map(|entry| {
+                    let complete = entry.completed_at_ms.is_some();
+                    let time = entry
+                        .completed_at_ms
+                        .or(entry.started_at_ms)
+                        .unwrap_or(time);
+                    (entry.item, complete, time)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            // Legacy replay materializes assistant/reasoning text from completed
+            // events, not streaming deltas, even while the containing turn runs.
+            turn.items
+                .into_iter()
+                .map(|item| (item, true, time))
+                .collect()
+        };
+        for (item, complete, time) in items {
             match item {
                 ThreadItem::AgentMessage { id: item, text, .. } => {
                     messages.push((id, turn.id.clone(), item, text, complete, time, None));

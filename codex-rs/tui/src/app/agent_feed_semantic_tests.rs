@@ -1150,3 +1150,141 @@ async fn semantic_item_completed_and_turn_completed_schedule_without_debounce() 
     assert!(rx.borrow().jobs[0].ready <= tokio::time::Instant::now());
     assert_eq!(rx.borrow().jobs[0].input.status, TurnStatus::Completed);
 }
+
+#[tokio::test]
+async fn semantic_running_history_schedules_completed_items_before_turn_end() -> anyhow::Result<()>
+{
+    use codex_app_server_client::{
+        AppServerClient, RemoteAppServerClient, RemoteAppServerConnectArgs, RemoteAppServerEndpoint,
+    };
+    use codex_app_server_protocol::{
+        JSONRPCMessage, ThreadHistoryMode, ThreadItemEntry, ThreadStatus, Turn, TurnItemsView,
+    };
+    use futures::{SinkExt, StreamExt};
+    use serde_json::json;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    for mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        let root = ThreadId::from_u128(1);
+        let agent = ThreadId::from_u128(2);
+        let now = chrono::Utc::now().timestamp_millis();
+        let message = |id: &str, text: &str| ThreadItem::AgentMessage {
+            id: id.into(),
+            text: text.into(),
+            phase: None,
+            memory_citation: None,
+            delivery: None,
+            questions: None,
+        };
+        let completed = message("message", "I found the parser bug.");
+        let open = message("open", "I am still");
+        let mut thread = crate::app::agents_overview::tests::overview_thread(
+            agent,
+            Some(root),
+            "Worker",
+            ThreadStatus::Active {
+                active_flags: vec![],
+            },
+        );
+        thread.history_mode = mode;
+        let turn = Turn {
+            id: "running".into(),
+            root_turn_id: None,
+            items_view: TurnItemsView::Full,
+            status: TurnStatus::InProgress,
+            error: None,
+            started_at: Some(now / 1000),
+            completed_at: None,
+            duration_ms: None,
+            items: if mode == ThreadHistoryMode::Legacy {
+                vec![completed.clone()]
+            } else {
+                vec![completed.clone(), open.clone()]
+            },
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(WsMessage::Text(text))) = socket.next().await {
+                let JSONRPCMessage::Request(request) = serde_json::from_str(&text).unwrap() else {
+                    continue;
+                };
+                let result = match request.method.as_str() {
+                    "initialize" => json!({"userAgent":"test"}),
+                    "thread/list" => {
+                        json!({"data":[thread],"nextCursor":null,"backwardsCursor":null})
+                    }
+                    "thread/turns/list" => {
+                        json!({"data":[turn],"nextCursor":null,"backwardsCursor":null})
+                    }
+                    "thread/items/list" => {
+                        assert_eq!(mode, ThreadHistoryMode::Paginated);
+                        let params = request.params.unwrap();
+                        assert_eq!(params["turnId"], "running");
+                        assert_eq!(params["sortDirection"], "desc");
+                        json!({"data":[
+                            ThreadItemEntry { turn_id: "running".into(), item: open.clone(), started_at_ms: Some(now), completed_at_ms: None },
+                            ThreadItemEntry { turn_id: "running".into(), item: ThreadItem::Reasoning { id: "reasoning".into(), summary: vec!["I checked the parser.".into()], content: vec!["private".into()] }, started_at_ms: Some(now-200), completed_at_ms: Some(now-100) },
+                            ThreadItemEntry { turn_id: "running".into(), item: completed.clone(), started_at_ms: Some(now-400), completed_at_ms: Some(now-300) }
+                        ],"nextCursor":null,"backwardsCursor":null})
+                    }
+                    method => panic!("unexpected RPC: {method}"),
+                };
+                socket
+                    .send(WsMessage::Text(
+                        json!({"id":request.id,"result":result}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = AppServerClient::Remote(
+            RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
+                endpoint: RemoteAppServerEndpoint::WebSocket {
+                    websocket_url: format!("ws://{address}"),
+                    auth_token: None,
+                },
+                client_name: "summary-test".into(),
+                client_version: "1".into(),
+                experimental_api: true,
+                mcp_server_openai_form_elicitation: false,
+                opt_out_notification_methods: vec![],
+                channel_capacity: 32,
+            })
+            .await?,
+        );
+        let snapshot =
+            super::super::io::load(&client.request_handle(), root, vec![], HashMap::new(), true)
+                .await;
+        assert!(snapshot.errors.is_empty(), "{:?}", snapshot.errors);
+        let (mut app, _, _) = crate::app::tests::make_test_app_with_channels().await;
+        app.primary_thread_id = Some(root);
+        app.active_thread_id = Some(root);
+        app.local_settings.tui.fullscreen_transcript = true;
+        app.agent_feed.semantic_available = true;
+        app.sync_agent_feed_root();
+        let (tx, rx) = watch::channel(Work::default());
+        app.agent_feed.summarizer = Some(Client { desired: tx });
+        app.apply_agent_feed_snapshot(root, app.agent_feed.generation, snapshot);
+        let work = rx.borrow();
+        assert_eq!(
+            work.jobs.len(),
+            1,
+            "running {mode:?} history must schedule a summary"
+        );
+        let input = &work.jobs[0].input;
+        assert_eq!(input.status, TurnStatus::InProgress);
+        let prompt = input.formatted(INPUT_BYTES);
+        assert!(prompt.contains("I found the parser bug."));
+        assert!(!prompt.contains("I am still"));
+        assert!(!prompt.contains("private"));
+        if mode == ThreadHistoryMode::Paginated {
+            assert!(prompt.contains("I checked the parser."));
+        }
+        drop(work);
+        client.shutdown().await?;
+        server.await?;
+    }
+    Ok(())
+}
