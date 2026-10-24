@@ -101,6 +101,14 @@ impl App {
             .get_mut(&thread_id)
             .and_then(Option::as_mut);
         match notification {
+            ServerNotification::TurnStarted(_) => {
+                if let Some(thread) = thread { thread.status = ThreadStatus::Active { active_flags: Vec::new() }; }
+            }
+            ServerNotification::TurnCompleted(turn) => {
+                if let Some(thread) = thread {
+                    thread.status = if turn.turn.status == codex_app_server_protocol::TurnStatus::Failed { ThreadStatus::SystemError } else { ThreadStatus::Idle };
+                }
+            }
             ServerNotification::ThreadTokenUsageUpdated(usage) => {
                 if self.agents_overview.threads.contains_key(&thread_id) {
                     self.agents_overview
@@ -140,7 +148,6 @@ impl App {
                 self.agents_overview
                     .requested_permission_profiles
                     .remove(&thread_id);
-                self.agents_overview.activity.remove(&thread_id);
                 if let Some(usage) = self.agents_overview.usage.get_mut(&thread_id) {
                     usage.tokens = None;
                 }
@@ -219,6 +226,9 @@ impl App {
     }
 
     pub(super) fn refresh_agents_overview_threads(&mut self, app_server: &AppServerSession) {
+        if !self.reconnect.offline {
+            self.refresh_unified_agents_tree(app_server, true);
+        }
         self.agents_overview.pin_refresh_requested = true;
         self.agents_overview.refresh_thread_ids.extend(
             self.agents_overview
@@ -407,6 +417,7 @@ impl App {
                                             ChatWidget::user_message_display_from_inputs(content)
                                                 .message;
                                     }
+                                    response.thread.turns = vec![turn.clone()];
                                     last_message =
                                         turn.items.iter().rev().find_map(|item| match item {
                                             ThreadItem::AgentMessage { text, .. } => {

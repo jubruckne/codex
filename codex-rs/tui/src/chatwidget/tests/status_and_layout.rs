@@ -2206,7 +2206,7 @@ async fn streaming_final_answer_keeps_task_running_state() {
     drain_insert_history(&mut rx);
 
     assert!(chat.bottom_pane.is_task_running());
-    assert!(!chat.bottom_pane.status_indicator_visible());
+    assert!(chat.bottom_pane.status_indicator_visible());
 
     chat.bottom_pane
         .set_composer_text("queued submission".to_string(), Vec::new(), Vec::new());
@@ -2232,7 +2232,7 @@ async fn answer_phase_controls_working_status_snapshot() {
     for (phase, working_visible, snapshot) in [
         (
             MessagePhase::FinalAnswer,
-            false,
+            true,
             "single_line_final_answer_hides_working_status",
         ),
         (
@@ -2421,12 +2421,12 @@ async fn idle_commit_ticks_do_not_restore_status_without_commentary_completion()
     chat.on_commit_tick();
     drain_insert_history(&mut rx);
 
-    assert_eq!(chat.bottom_pane.status_indicator_visible(), false);
+    assert_eq!(chat.bottom_pane.status_indicator_visible(), true);
     assert_eq!(chat.bottom_pane.is_task_running(), true);
 
     // A second idle tick should not toggle the row back on and cause jitter.
     chat.on_commit_tick();
-    assert_eq!(chat.bottom_pane.status_indicator_visible(), false);
+    assert_eq!(chat.bottom_pane.status_indicator_visible(), true);
 }
 
 #[tokio::test]
@@ -2444,7 +2444,7 @@ async fn final_answer_completion_restores_status_indicator_for_pending_steer() {
     chat.on_commit_tick();
     drain_insert_history(&mut rx);
 
-    assert_eq!(chat.bottom_pane.status_indicator_visible(), false);
+    assert_eq!(chat.bottom_pane.status_indicator_visible(), true);
     assert_eq!(chat.bottom_pane.is_task_running(), true);
 
     chat.bottom_pane.set_composer_text(
@@ -2499,7 +2499,7 @@ async fn commentary_completion_restores_status_indicator_before_exec_begin() {
     chat.on_commit_tick();
     drain_insert_history(&mut rx);
 
-    assert_eq!(chat.bottom_pane.status_indicator_visible(), false);
+    assert_eq!(chat.bottom_pane.status_indicator_visible(), true);
 
     complete_assistant_message(
         &mut chat,
@@ -2928,7 +2928,7 @@ async fn stream_error_restores_hidden_status_indicator() {
     chat.on_agent_message_delta("Preamble line\n".to_string());
     chat.on_commit_tick();
     drain_insert_history(&mut rx);
-    assert!(!chat.bottom_pane.status_indicator_visible());
+    assert!(chat.bottom_pane.status_indicator_visible());
 
     let msg = "Reconnecting... 2/5";
     let details = "Idle timeout waiting for SSE";
@@ -4789,7 +4789,7 @@ async fn unterminated_prose_is_visible_before_completion() {
         }
 
         assert!(draw_rx.try_recv().is_ok());
-        assert!(!chat.bottom_pane.status_indicator_visible());
+        assert!(chat.bottom_pane.status_indicator_visible());
         let snapshot = if mode == ModeKind::Plan {
             assert_eq!(
                 chat.plan_stream_controller.as_ref().unwrap().queued_lines(),
@@ -4853,7 +4853,7 @@ async fn newline_agent_delta_redraws_stream_tail_after_noop_catch_up() {
     chat.on_task_started();
     chat.handle_streaming_delta("Earlier line\n".to_string());
     chat.on_commit_tick();
-    assert!(!chat.bottom_pane.status_indicator_visible());
+    assert!(chat.bottom_pane.status_indicator_visible());
     while draw_rx.try_recv().is_ok() {}
 
     chat.handle_streaming_delta("Intro line\n| Step | Owner |\n".to_string());
@@ -4882,7 +4882,7 @@ async fn newline_plan_delta_redraws_stream_tail_after_noop_catch_up() {
     chat.on_task_started();
     chat.on_plan_delta("Earlier line\n".to_string());
     chat.on_commit_tick();
-    assert!(!chat.bottom_pane.status_indicator_visible());
+    assert!(chat.bottom_pane.status_indicator_visible());
     while draw_rx.try_recv().is_ok() {}
 
     chat.on_plan_delta("Intro line\n| Step | Owner |\n".to_string());
@@ -4919,21 +4919,22 @@ async fn reasoning_delta_redraws_when_latest_usable_line_changes() {
     chat.frame_requester = frame_requester;
 
     chat.on_agent_reasoning_delta("**Checking".to_string());
-    assert!(matches!(
-        draw_rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
+    assert!(draw_rx.try_recv().is_ok());
     assert_eq!(chat.reasoning_header, None);
 
     chat.on_agent_reasoning_delta(" files**".to_string());
     assert!(draw_rx.try_recv().is_ok());
-    assert_eq!(chat.reasoning_header.as_deref(), Some("Checking files"));
+    assert_eq!(chat.reasoning_header, None);
 
     chat.on_agent_reasoning_delta("\nPreparing a response".to_string());
     assert!(draw_rx.try_recv().is_ok());
     assert_eq!(
-        chat.reasoning_header.as_deref(),
-        Some("Preparing a response")
+        chat.status_state
+            .live_reasoning
+            .as_ref()
+            .unwrap()
+            .markdown_source(),
+        "**Checking files**\nPreparing a response"
     );
     chat.on_agent_reasoning_delta("".to_string());
     assert!(matches!(
@@ -4958,7 +4959,15 @@ async fn reasoning_delta_does_not_double_schedule_visible_status_redraw() {
 
     chat.on_agent_reasoning_delta("**Checking files**".to_string());
 
-    assert_eq!(chat.reasoning_header.as_deref(), Some("Checking files"));
+    assert_eq!(chat.reasoning_header, None);
+    assert_eq!(
+        chat.status_state
+            .live_reasoning
+            .as_ref()
+            .unwrap()
+            .markdown_source(),
+        "**Checking files**"
+    );
     assert!(draw_rx.try_recv().is_ok());
     assert!(matches!(
         draw_rx.try_recv(),
@@ -4975,14 +4984,14 @@ async fn reasoning_delta_restores_recreated_status_indicator_header() {
     chat.on_agent_message_delta("Preamble line\n".to_string());
     chat.on_commit_tick();
     drain_insert_history(&mut rx);
-    assert!(!chat.bottom_pane.status_indicator_visible());
+    assert!(chat.bottom_pane.status_indicator_visible());
 
     begin_unified_exec_startup(&mut chat, "call-1", "proc-1", "sleep 2");
     let status = chat
         .bottom_pane
         .status_widget()
         .expect("status indicator should be recreated");
-    assert_eq!(status.header(), "Checking files");
+    assert_eq!(status.header(), "Working");
 
     chat.on_agent_reasoning_delta(" and preparing a response".to_string());
 
@@ -4990,7 +4999,7 @@ async fn reasoning_delta_restores_recreated_status_indicator_header() {
         .bottom_pane
         .status_widget()
         .expect("status indicator should remain visible");
-    assert_eq!(status.header(), "Checking files and preparing a response");
+    assert_eq!(status.header(), "Working");
 
     let width: u16 = 80;
     let height = chat.desired_height(width);

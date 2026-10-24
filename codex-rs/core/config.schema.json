@@ -4959,6 +4959,7 @@
               "open_transcript": null,
               "queue": null,
               "submit": null,
+              "toggle_agent_feed": null,
               "toggle_fast_mode": null,
               "toggle_raw_output": null,
               "toggle_shortcuts": null,
@@ -5821,6 +5822,14 @@
           ],
           "description": "Submit the current composer draft."
         },
+        "toggle_agent_feed": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Show or hide the fullscreen subagent message feed."
+        },
         "toggle_fast_mode": {
           "allOf": [
             {
@@ -5983,6 +5992,7 @@
             "open_transcript": null,
             "queue": null,
             "submit": null,
+            "toggle_agent_feed": null,
             "toggle_fast_mode": null,
             "toggle_raw_output": null,
             "toggle_shortcuts": null,

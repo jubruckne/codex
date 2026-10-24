@@ -16,6 +16,9 @@ impl AgentsOverviewView {
         indices: &[usize],
         grouping: AgentsOverviewGrouping,
     ) -> Vec<CenterRow> {
+        if self.current_tree {
+            return indices.iter().copied().map(CenterRow::Task).collect();
+        }
         let mut entries = Vec::new();
         let mut previous = None;
         for index in indices.iter().copied() {

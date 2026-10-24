@@ -469,7 +469,7 @@ async fn empty_enter_returns_to_latest_with_contextual_hints() -> Result<()> {
             .scroll(&app.transcript_cells, /*rows*/ -10);
         app.render_owned_transcript(&mut tui, size)?;
         let cursor = tui.terminal.last_known_cursor_pos;
-        assert!(screen(&tui).contains("enter/esc latest"));
+        assert!(screen(&tui).contains("Back to bottom"));
 
         // Release/repeat events and modified Enter must not become a navigation command.
         for key in [
@@ -487,7 +487,7 @@ async fn empty_enter_returns_to_latest_with_contextual_hints() -> Result<()> {
 
         app.chat_widget.apply_external_edit("draft".to_string());
         app.render_owned_transcript(&mut tui, size)?;
-        assert!(screen(&tui).contains("esc latest"));
+        assert!(screen(&tui).contains("Back to bottom"));
         assert!(!screen(&tui).contains("enter/esc latest"));
         app.chat_widget.apply_external_edit(String::new());
         app.transcript_cells
@@ -520,7 +520,7 @@ async fn empty_enter_returns_to_latest_with_contextual_hints() -> Result<()> {
             app.transcript_view
                 .scroll(&app.transcript_cells, /*rows*/ -10);
             app.render_owned_transcript(&mut tui, size)?;
-            assert!(screen(&tui).contains("enter/esc latest"));
+            assert!(screen(&tui).contains("Back to bottom"));
             while events.try_recv().is_ok() {}
             app.handle_tui_event(
                 &mut tui,
@@ -667,7 +667,8 @@ async fn escape_returns_to_latest_without_changing_the_composer_draft() -> Resul
         .push(Arc::new(PlainHistoryCell::new(vec!["new output".into()])));
     app.render_owned_transcript(&mut tui, size)?;
     let before = screen(&tui);
-    assert!(before.contains("New activity · esc latest"));
+    assert!(before.contains("New activity"));
+    assert!(before.contains("Back to bottom"));
     app.handle_tui_event(
         &mut tui,
         &mut app_server,

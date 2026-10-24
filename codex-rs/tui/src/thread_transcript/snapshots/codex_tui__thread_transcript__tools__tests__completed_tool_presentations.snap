@@ -1,13 +1,10 @@
 ---
 source: tui/src/thread_transcript/tools_tests.rs
+assertion_line: 136
 expression: rendered
 ---
 Command: compact
 • Ran cargo check
-  └ output line 1
-    output line 2
-    output line 3
-    +9 lines (⌃t to view transcript)
 
 Command: detailed
 $ cargo check

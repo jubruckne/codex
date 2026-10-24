@@ -932,15 +932,15 @@ fn find_expands_only_the_match_and_preserves_manual_disclosures() {
             Arc::new(crate::exec_cell::ExecCell::new(
                 crate::exec_cell::ExecCall {
                     call_id: name.into(),
-                    command: vec![format!("echo visible\necho hidden {name}")],
+                    command: vec!["echo visible".into()],
                     parsed: Vec::new(),
                     output: Some(crate::exec_cell::CommandOutput::new(
                         /*exit_code*/ 0,
-                        String::new(),
+                        format!("echo hidden {name}"),
                     )),
                     source: codex_app_server_protocol::CommandExecutionSource::Agent,
                     start_time: None,
-                    duration: None,
+                    duration: Some(std::time::Duration::from_secs(1)),
                     interaction_input: None,
                 },
                 /*animations_enabled*/ false,

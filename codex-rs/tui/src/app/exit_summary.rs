@@ -80,6 +80,15 @@ impl App {
 impl AppExitInfo {
     /// Format the terminal summary for both the CLI and standalone TUI binaries.
     pub fn format_exit_messages(self, color_enabled: bool) -> Vec<String> {
+        self.format_exit_messages_with_resume_executable(color_enabled, "codex")
+    }
+
+    /// Use the launching frontend for resume hints, retaining official daemon stop guidance.
+    pub fn format_exit_messages_with_resume_executable(
+        self,
+        color_enabled: bool,
+        resume_executable: &str,
+    ) -> Vec<String> {
         let color_command = |command: String| {
             if color_enabled {
                 format!("\u{1b}[36m{command}\u{1b}[39m")
@@ -103,6 +112,9 @@ impl AppExitInfo {
             };
             lines.push(message.to_string());
             let mut resume_command = disconnect.command.clone();
+            if let Some(executable) = resume_command.first_mut() {
+                *executable = resume_executable.to_string();
+            }
             resume_command.extend(["resume".to_string(), thread_id.to_string()]);
             lines.push("To reconnect, run:".to_string());
             lines.push(format!(
@@ -138,12 +150,12 @@ impl AppExitInfo {
             lines.push("To continue this session, run:".to_string());
             lines.push(format!(
                 "  {}",
-                color_command(format!("codex resume {}", thread.thread_id)),
+                color_command(format!("{resume_executable} resume {}", thread.thread_id)),
             ));
             if let Some(thread_name) = thread.thread_name.filter(|name| !name.is_empty()) {
                 lines.push(format!(
                     "Or run {} and select {}.",
-                    color_command("codex resume".to_string()),
+                    color_command(format!("{resume_executable} resume")),
                     color_command(thread_name),
                 ));
             }

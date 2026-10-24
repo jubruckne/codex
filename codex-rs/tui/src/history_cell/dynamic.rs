@@ -23,6 +23,10 @@ use std::sync::RwLock;
 pub(crate) struct DynamicToolCallCell {
     call_id: String,
     data: Arc<RwLock<DynamicToolCallData>>,
+    native_presentation: bool,
+    native_frame_requester: Option<crate::tui::FrameRequester>,
+    animations_enabled: bool,
+    start_time: std::time::Instant,
 }
 
 #[derive(Debug)]
@@ -41,7 +45,53 @@ impl DynamicToolCallCell {
         Some(Self {
             call_id,
             data: Arc::new(RwLock::new(data)),
+            native_presentation: false,
+            native_frame_requester: None,
+            animations_enabled: false,
+            start_time: std::time::Instant::now(),
         })
+    }
+
+    pub(crate) fn configure_native(
+        &mut self,
+        enabled: bool,
+        requester: Option<crate::tui::FrameRequester>,
+        animations: bool,
+    ) {
+        self.native_presentation = enabled;
+        self.native_frame_requester = requester;
+        self.animations_enabled = animations;
+    }
+
+    fn native_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        let data = self
+            .data
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut lines = vec![clipped_line(data.header(), width)];
+        lines.extend(super::native_tools::arguments(&data.arguments, width));
+        if data.is_active() {
+            lines.push(super::native_tools::spinner(
+                self.start_time,
+                self.animations_enabled,
+                self.native_frame_requester.as_ref(),
+                width,
+            ));
+        } else if data.interrupted || data.status == DynamicToolCallStatus::Failed {
+            lines.push(super::native_tools::error(
+                if data.interrupted {
+                    "Cancelled"
+                } else {
+                    "Error: tool call failed (Ctrl+T for details)"
+                },
+                width,
+            ));
+        }
+        lines
+    }
+
+    pub(crate) fn started_at(&self) -> std::time::Instant {
+        self.start_time
     }
 
     pub(crate) fn call_id(&self) -> &str {
@@ -186,6 +236,9 @@ impl HistoryCell for DynamicToolCallCell {
     }
 
     fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        if self.native_presentation {
+            return self.native_lines(width);
+        }
         let data = self
             .data
             .read()
@@ -246,6 +299,37 @@ impl HistoryCell for DynamicToolCallCell {
                 .subsequent_indent("    ".into()),
         ));
         lines
+    }
+
+    fn display_lines_for_mode(
+        &self,
+        width: u16,
+        mode: super::HistoryRenderMode,
+    ) -> Vec<Line<'static>> {
+        if self.native_presentation {
+            let lines = self.display_lines(width);
+            return if mode == super::HistoryRenderMode::Raw {
+                super::plain_lines(lines)
+            } else {
+                lines
+            };
+        }
+        if mode == super::HistoryRenderMode::Raw {
+            self.raw_lines()
+        } else {
+            self.display_lines(width)
+        }
+    }
+    fn display_hyperlink_lines_for_mode(
+        &self,
+        width: u16,
+        mode: super::HistoryRenderMode,
+    ) -> Vec<HyperlinkLine> {
+        if mode == super::HistoryRenderMode::Raw {
+            plain_hyperlink_lines(self.display_lines_for_mode(width, mode))
+        } else {
+            self.display_hyperlink_lines(width)
+        }
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {

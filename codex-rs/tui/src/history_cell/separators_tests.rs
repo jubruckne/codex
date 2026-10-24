@@ -41,12 +41,12 @@ fn completion_label_shows_known_durations_including_short_turns() {
 
     insta::assert_snapshot!(labels.join("\n"), @"
     2:32 PM
-    Worked for <1s • 2:32 PM
-    Worked for 12s • 2:32 PM
-    Worked for 1m 0s • 2:32 PM
-    Worked for 1m 1s • 2:32 PM
-    Worked for 2m 5s • 2:32 PM
-    Worked for 1h 0m 5s • 2:32 PM
+    Worked for <1s · 2:32 PM
+    Worked for 12s · 2:32 PM
+    Worked for 1m 0s · 2:32 PM
+    Worked for 1m 1s · 2:32 PM
+    Worked for 2m 5s · 2:32 PM
+    Worked for 1h 0m 5s · 2:32 PM
     ");
 }
 
@@ -60,9 +60,9 @@ fn completion_label_includes_date_when_viewed_on_another_day() {
     .with_completed_at(completed_at, ClockFormat::TwelveHour);
     let tomorrow = completed_at.date_naive().succ_opt().expect("next day");
 
-    insta::assert_snapshot!(cell.label(tomorrow).expect("completion label"), @"Worked for 2m 5s • Sep 6 at 2:32 PM");
+    insta::assert_snapshot!(cell.label(tomorrow).expect("completion label"), @"Worked for 2m 5s · Sep 6 at 2:32 PM");
     let next_year = tomorrow.with_year(/*year*/ 2001).expect("valid next year");
-    insta::assert_snapshot!(cell.label(next_year).expect("completion label"), @"Worked for 2m 5s • Sep 6, 2000 at 2:32 PM");
+    insta::assert_snapshot!(cell.label(next_year).expect("completion label"), @"Worked for 2m 5s · Sep 6, 2000 at 2:32 PM");
 }
 
 #[test]
@@ -149,12 +149,12 @@ fn completion_wraps_metadata_and_preserves_unwrapped_raw_text() {
     let rendered = lines.iter().map(ToString::to_string).collect::<Vec<_>>();
 
     insta::assert_snapshot!(rendered.join("\n"), @r"
-    Worked for 2m 5s • Sep
-    6, 2000 at 2:32 PM •
+    Worked for 2m 5s · Sep
+    6, 2000 at 2:32 PM ·
     Local tools: 3 calls
     (2.5s)
     ");
-    insta::assert_snapshot!(cell.raw_lines()[0].to_string(), @"Worked for 2m 5s • Sep 6, 2000 at 2:32 PM • Local tools: 3 calls (2.5s)");
+    insta::assert_snapshot!(cell.raw_lines()[0].to_string(), @"Worked for 2m 5s · Sep 6, 2000 at 2:32 PM · Local tools: 3 calls (2.5s)");
     for width in [0, 1, 5, 24] {
         assert!(
             cell.display_lines(width)
@@ -198,4 +198,50 @@ fn completion_rendering_uses_the_captured_display_date() {
 
     insta::assert_snapshot!(cell.display_lines(/*width*/ 80)[0].to_string(), @"  2:32 PM");
     assert_eq!(cell.raw_lines(), vec![Line::from("2:32 PM")]);
+}
+
+#[test]
+fn shell_grouping_footer_tokens_middle_dots_and_narrow_width() {
+    let cell = FinalMessageSeparator::new(Some(18), None)
+        .with_completed_at(completed_at(), ClockFormat::TwentyFourHour)
+        .with_token_usage(Some((12_400, 2_100)));
+    assert_eq!(
+        cell.label(completed_at().date_naive()).unwrap(),
+        "Worked for 18s · ↑ 12.4k ↓ 2.1k · 14:32"
+    );
+    assert!(!cell.raw_lines()[0].to_string().contains('•'));
+    assert!(
+        cell.display_lines(30)
+            .iter()
+            .all(|line| !line.to_string().contains('↑'))
+    );
+    assert!(
+        cell.display_lines(120)
+            .iter()
+            .any(|line| line.to_string().contains("12.4k"))
+    );
+}
+
+#[test]
+fn context_growth_footer_formats_signed_tokens_and_omits_optional_usage_when_narrow() {
+    for (growth, expected) in [(3_200, "+3.2k"), (-20_000, "−20.0k"), (0, "+0")] {
+        let mut cell = FinalMessageSeparator::new(Some(8), None)
+            .with_completed_at(completed_at(), ClockFormat::TwentyFourHour)
+            .with_token_usage(Some((274_300, 138)))
+            .with_context_growth(Some(growth));
+        cell.display_date = completed_at().date_naive();
+        assert_eq!(
+            cell.label(completed_at().date_naive()).unwrap(),
+            format!("Worked for 8s · ↑ 274.3k ↓ 138 · context {expected} · 14:32")
+        );
+        let narrow = cell.display_lines(30);
+        assert_eq!(narrow[0].to_string(), "  Worked for 8s · 14:32");
+        assert!(cell.raw_lines()[0].to_string().contains(expected));
+        for width in [0, 1, 5, 30, 60, 120] {
+            assert!(cell.display_lines(width).iter().all(|line| line.width() <= usize::from(width)));
+        }
+    }
+    let context_only = FinalMessageSeparator::new(Some(8), None)
+        .with_context_growth(Some(3_200));
+    assert_eq!(context_only.display_lines(20)[0].to_string(), "  Worked for 8s");
 }

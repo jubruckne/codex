@@ -665,3 +665,132 @@ fn mcp_result_preview_preserves_source_text_and_excludes_tree_gutters() {
         );
     }
 }
+
+#[test]
+fn other_tool_mcp_native_spinner_success_failure_redaction_and_full_transcript() {
+    let mut cell = McpToolCallCell::new(
+        "native".into(),
+        McpInvocation {
+            server: "board".into(),
+            tool: "post".into(),
+            arguments: Some(
+                json!({"thread_id": "173", "headers": {"Authorization": "SECRET"}, "nested": {"api_key": "KEY"}}),
+            ),
+        },
+        true,
+    );
+    let (requester, mut frames) = crate::tui::FrameRequester::test_channel();
+    cell.configure_native(true, Some(requester), false);
+    let live = visible_lines(cell.display_hyperlink_lines(120))
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(live.contains("board.post") && live.contains("173") && live.contains("<redacted>"));
+    assert!(!live.contains("SECRET") && !live.contains("KEY"));
+    assert!(frames.try_recv().is_ok());
+    for width in [1, 8, 20, 80] {
+        assert!(
+            cell.display_lines(width)
+                .iter()
+                .all(|line| line.width() <= usize::from(width))
+        );
+    }
+    cell.complete(
+        Duration::ZERO,
+        Ok(CallToolResult {
+            content: vec![json!({"type": "text", "text": "LARGE RESULT PAYLOAD"})],
+            is_error: None,
+            structured_content: None,
+            meta: None,
+        }),
+    );
+    let full = cell.transcript_lines(120);
+    assert!(
+        full.iter()
+            .any(|line| line.to_string().contains("LARGE RESULT PAYLOAD"))
+    );
+    for mode in [HistoryRenderMode::Rich, HistoryRenderMode::Raw] {
+        assert!(
+            !cell
+                .display_lines_for_mode(120, mode)
+                .iter()
+                .any(|line| line.to_string().contains("RESULT PAYLOAD"))
+        );
+    }
+    cell.configure_native(false, None, true);
+    assert!(
+        cell.display_lines(120)
+            .iter()
+            .any(|line| line.to_string().contains("RESULT PAYLOAD"))
+    );
+    cell.configure_native(true, None, true);
+    assert_eq!(cell.transcript_lines(120), full);
+    cell.complete(Duration::ZERO, Err("sensitive diagnostic body".into()));
+    let failed = cell
+        .display_lines(120)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(failed.contains("✗") && failed.contains("Error:"));
+    assert!(!failed.contains("sensitive diagnostic"));
+    assert!(
+        cell.raw_lines()
+            .iter()
+            .any(|line| line.to_string().contains("sensitive diagnostic"))
+    );
+    cell.mark_failed();
+    assert!(
+        cell.display_lines(120)
+            .iter()
+            .any(|line| line.to_string().contains("Cancelled"))
+    );
+}
+
+#[test]
+fn other_tool_code_mode_native_retains_complete_source_without_parsing_nested_results() {
+    let source = "const results = await Promise.all([\n  tools.first({q: 'a'}),\n  tools.second({q: 'b'})\n]);\ntext(results);";
+    let mut cell = McpToolCallCell::new(
+        "code".into(),
+        McpInvocation {
+            server: "node_repl".into(),
+            tool: "js".into(),
+            arguments: Some(json!({"title": "Search", "code": source})),
+        },
+        false,
+    );
+    cell.configure_native(true, None, false);
+    let live = cell
+        .display_lines(160)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(live.ends_with("  └ ◌"));
+    for line in source.lines() {
+        assert!(live.contains(line));
+    }
+    assert_eq!(live.matches("tools.first").count(), 1);
+    cell.complete(
+        Duration::ZERO,
+        Ok(CallToolResult {
+            content: vec![json!({"type": "text", "text": "Nested result: tools.first succeeded"})],
+            is_error: Some(true),
+            structured_content: None,
+            meta: None,
+        }),
+    );
+    let done = cell
+        .display_lines(160)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!done.contains("Nested result") && done.contains("Error:"));
+    assert!(
+        cell.transcript_lines(160)
+            .iter()
+            .any(|line| line.to_string().contains("Nested result"))
+    );
+}

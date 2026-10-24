@@ -40,6 +40,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+use uuid::Uuid;
 
 use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_command::AppCommand;
@@ -308,6 +309,7 @@ mod hook_lifecycle;
 mod hooks;
 mod interaction;
 pub(crate) use interaction::KeyEventAction;
+mod context_summary;
 mod skills;
 mod slash_command_args;
 mod slash_dispatch;
@@ -573,6 +575,7 @@ pub(crate) struct ChatWidget {
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
     refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,
     next_status_refresh_request_id: u64,
+    context_summary_request: Option<Uuid>,
     pending_rate_limit_reset_request_id: Option<u64>,
     pending_rate_limit_reset_idempotency_key: Option<String>,
     rate_limit_reset_picker_request_id: Option<u64>,
@@ -690,7 +693,7 @@ pub(crate) struct ChatWidget {
     side_placeholder_text: String,
     forked_from: Option<ThreadId>,
     interrupted_turn_notice_mode: InterruptedTurnNoticeMode,
-    frame_requester: FrameRequester,
+    pub(crate) frame_requester: FrameRequester,
     // Whether to include the initial welcome banner on session configured
     show_welcome_banner: bool,
     // One-shot tooltip override for the primary startup session.
@@ -2003,6 +2006,7 @@ impl ChatWidget {
         let mut realtime_cells = self.realtime_conversation.live_transcript_cells();
         let rate_limit_reset_hint = self.pending_rate_limit_reset_hint();
         if cell.is_none()
+            && self.status_state.live_reasoning.is_none()
             && self
                 .realtime_conversation
                 .live_transcript_cells()
@@ -2013,8 +2017,12 @@ impl ChatWidget {
         {
             return None;
         }
-        let live_sources: [Option<&dyn HistoryCell>; 2] = [
+        let live_sources: [Option<&dyn HistoryCell>; 3] = [
             cell.map(AsRef::as_ref),
+            self.status_state
+                .live_reasoning
+                .as_deref()
+                .map(|cell| cell as &dyn HistoryCell),
             rate_limit_reset_hint.map(|cell| cell as &dyn HistoryCell),
         ];
         Some(ActiveCellTranscriptKey {
@@ -2069,6 +2077,16 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn status_line_text(&self) -> Option<String> {
         self.bottom_pane.status_line_text()
+    }
+
+    pub(crate) fn restore_turn_tokens(&mut self, usage: crate::token_usage::TurnTokenUsage) {
+        self.bottom_pane.set_turn_tokens(
+            self.turn_lifecycle
+                .agent_turn_running
+                .then(|| usage.counts())
+                .flatten(),
+        );
+        self.status_state.turn_tokens = usage;
     }
 
     pub(crate) fn clear_token_usage(&mut self) {

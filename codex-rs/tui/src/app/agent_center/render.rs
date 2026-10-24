@@ -52,12 +52,18 @@ impl AgentsOverviewView {
     fn center_layout(&self, area: Rect) -> CenterLayout {
         let state = self.state();
         let footer_height = u16::from(area.height >= 2);
-        let header_height = if area.height >= 6 { 3 } else { 0 };
+        let header_height = if area.height < 6 {
+            0
+        } else if self.current_tree {
+            1
+        } else {
+            3
+        };
         let footer = row(area, area.height - footer_height, footer_height);
         let header = row(area, /*offset*/ 0, header_height);
         let body = row(area, header_height, footer.y - header.bottom())
             .inner(Margin::new(/*horizontal*/ 2, /*vertical*/ 0));
-        let [list, gap, details] = if body.width >= 90 {
+        let [list, gap, details] = if !self.current_tree && body.width >= 90 {
             Layout::horizontal([
                 Constraint::Min(46),
                 Constraint::Length(3),
@@ -130,63 +136,67 @@ impl Renderable for AgentsOverviewView {
             |area: Rect| area.inner(Margin::new(/*horizontal*/ 2, /*vertical*/ 0));
         let footer_hints = self.center_footer_hints();
         let state = self.state();
-        let filter_keys = if state.editing_metadata() {
-            String::new()
+        if self.current_tree {
+            line("Agents Overview".bold(), inset(layout.header), buf);
         } else {
-            self.center_filter_hint()
-        };
-        let grouping = match state.grouping {
-            AgentsOverviewGrouping::Project => "Project",
-            AgentsOverviewGrouping::Status => "Status",
-            AgentsOverviewGrouping::Model => "Model",
-        };
-        let group_key = self
-            .agents_keymap
-            .primary_hint("toggle_grouping", &self.agents_keymap.toggle_grouping)
-            .map(ShortcutHint::display_label)
-            .unwrap_or_default();
-        line(
-            vec![
-                "Agent command center".bold(),
-                format!("  Group: {grouping}  {group_key}").dim(),
-            ],
-            inset(layout.header),
-            buf,
-        );
-        let labels = TASK_FILTERS
-            .iter()
-            .map(|(label, group)| {
-                let count = self
-                    .rows
-                    .iter()
-                    .filter(|row| group.is_none_or(|group| group == row.group))
-                    .count();
-                format!("{label} {count}")
-            })
-            .collect::<Vec<_>>();
-        let mut tabs = inset(row(layout.header, /*offset*/ 1, /*height*/ 1));
-        let filter_hint = hint_line(&[(filter_keys, "filter".into())]);
-        if tabs.width >= 80 && filter_hint.width() > 0 {
-            let hint_width = filter_hint.width() as u16;
-            filter_hint.render(
-                Rect::new(tabs.right() - hint_width, tabs.y, hint_width, tabs.height),
+            let filter_keys = if state.editing_metadata() {
+                String::new()
+            } else {
+                self.center_filter_hint()
+            };
+            let grouping = match state.grouping {
+                AgentsOverviewGrouping::Project => "Project",
+                AgentsOverviewGrouping::Status => "Status",
+                AgentsOverviewGrouping::Model => "Model",
+            };
+            let group_key = self
+                .agents_keymap
+                .primary_hint("toggle_grouping", &self.agents_keymap.toggle_grouping)
+                .map(ShortcutHint::display_label)
+                .unwrap_or_default();
+            line(
+                vec![
+                    "Agent command center".bold(),
+                    format!("  Group: {grouping}  {group_key}").dim(),
+                ],
+                inset(layout.header),
                 buf,
             );
-            tabs.width = tabs.width.saturating_sub(hint_width + 2);
+            let labels = TASK_FILTERS
+                .iter()
+                .map(|(label, group)| {
+                    let count = self
+                        .rows
+                        .iter()
+                        .filter(|row| group.is_none_or(|group| group == row.group))
+                        .count();
+                    format!("{label} {count}")
+                })
+                .collect::<Vec<_>>();
+            let mut tabs = inset(row(layout.header, /*offset*/ 1, /*height*/ 1));
+            let filter_hint = hint_line(&[(filter_keys, "filter".into())]);
+            if tabs.width >= 80 && filter_hint.width() > 0 {
+                let hint_width = filter_hint.width() as u16;
+                filter_hint.render(
+                    Rect::new(tabs.right() - hint_width, tabs.y, hint_width, tabs.height),
+                    buf,
+                );
+                tabs.width = tabs.width.saturating_sub(hint_width + 2);
+            }
+            render_filled_tab_bar(
+                &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                state.status_filter,
+                tabs,
+                buf,
+            );
+            line(
+                "─"
+                    .repeat(usize::from(area.width.saturating_sub(/*rhs*/ 4)))
+                    .dim(),
+                inset(row(layout.header, /*offset*/ 2, /*height*/ 1)),
+                buf,
+            );
         }
-        render_filled_tab_bar(
-            &labels.iter().map(String::as_str).collect::<Vec<_>>(),
-            state.status_filter,
-            tabs,
-            buf,
-        );
-        line(
-            "─"
-                .repeat(usize::from(area.width.saturating_sub(/*rhs*/ 4)))
-                .dim(),
-            inset(row(layout.header, /*offset*/ 2, /*height*/ 1)),
-            buf,
-        );
         if state.editing_metadata() {
             buf.set_style(layout.search, crate::bottom_pane::active_tab_style());
             if state.rename_target.is_some() {

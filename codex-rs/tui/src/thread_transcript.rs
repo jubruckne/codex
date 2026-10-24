@@ -1,5 +1,5 @@
 //! Project persisted items into the same rich cells as completed live output.
-//! Tool grouping spans hidden reasoning but stops at visible content and turn boundaries.
+//! Tool grouping retains reasoning summaries but stops at other visible content and turn boundaries.
 //! Only one computer or exploration group can be pending at a time.
 
 use std::sync::Arc;
@@ -128,6 +128,24 @@ pub(crate) fn thread_items_to_transcript_cells(
     raw_reasoning_visibility: RawReasoningVisibility,
     config: Option<&Config>,
 ) -> TranscriptCells {
+    thread_items_to_transcript_cells_with_native_commands(
+        thread_id,
+        cwd,
+        items,
+        raw_reasoning_visibility,
+        config,
+        false,
+    )
+}
+
+pub(crate) fn thread_items_to_transcript_cells_with_native_commands(
+    thread_id: Option<ThreadId>,
+    cwd: &AbsolutePathBuf,
+    items: impl IntoIterator<Item = ThreadItem>,
+    raw_reasoning_visibility: RawReasoningVisibility,
+    config: Option<&Config>,
+    native_commands: bool,
+) -> TranscriptCells {
     let inline_visualization_context = config.and_then(|config| {
         thread_id.and_then(|thread_id| InlineVisualizationContext::from_config(config, thread_id))
     });
@@ -152,7 +170,13 @@ pub(crate) fn thread_items_to_transcript_cells(
         }
         if let Some(cell) = tools::historical_tool_fallback(&item) {
             PendingActivity::flush(&mut pending, &mut cells);
-            cells.push(Arc::new(cell));
+            if let Some(command) = tools::CommandHistory::from_native_item(item.clone()) {
+                let mut command = command.into_cell();
+                command.configure_native(native_commands, None, true);
+                cells.push(Arc::new(command));
+            } else {
+                cells.push(Arc::new(cell));
+            }
             continue;
         }
         match item {
@@ -323,7 +347,7 @@ fn item_to_cells(
                     header,
                     text,
                     cwd.as_path(),
-                    /*transcript_only*/ true,
+                    /*transcript_only*/ false,
                 );
                 cell.set_source_item_id(id);
                 cells.push(Arc::new(cell));

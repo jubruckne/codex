@@ -2,6 +2,41 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
+async fn numeric_agents_navigation_uses_displayed_slots_and_respects_input_context() -> Result<()> {
+    let (mut app, _events, _op_rx) = make_test_app_with_channels().await;
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    app.primary_thread_id = Some(root);
+    app.active_thread_id = Some(root);
+    app.app_server_target = AppServerTarget::LocalDaemon {
+        endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
+            socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
+        },
+        allow_embedded_fallback: false,
+    };
+    app.agent_navigation.upsert(root, None, None, false);
+    app.agent_navigation.upsert(child, None, None, false);
+    app.agent_navigation.set_agent_path(child, Some("/root/review".into()));
+    app.agent_navigation.set_quick_switch_width(80);
+    app.sync_agent_navigation_strip();
+    let root_key = KeyEvent::new(KeyCode::Char('0'), KeyModifiers::CONTROL);
+    let child_key = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL);
+    assert_eq!(app.quick_switch_target_for_key(root_key), Some(root));
+    assert_eq!(app.quick_switch_target_for_key(child_key), Some(child));
+    assert_eq!(
+        app.quick_switch_target_for_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::CONTROL)),
+        None
+    );
+    app.chat_widget.apply_external_edit("x".to_string());
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "x");
+    assert_eq!(app.quick_switch_target_for_key(child_key), Some(child));
+    assert_eq!(app.chat_widget.composer_text_with_pending(), "x");
+    app.app_server_target = AppServerTarget::Embedded;
+    assert_eq!(app.quick_switch_target_for_key(child_key), None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn agents_navigation_requires_local_daemon() -> Result<()> {
     let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -36,7 +71,7 @@ async fn agents_navigation_requires_local_daemon() -> Result<()> {
         .await?;
         if enabled {
             let event = events.try_recv()?;
-            assert_matches!(event, AppEvent::OpenAgentsOverview);
+            assert_matches!(event, AppEvent::OpenCurrentAgentsOverview);
             app.handle_event(&mut tui, &mut app_server, event).await?;
             assert!(!app.chat_widget.no_modal_or_popup_active());
         } else {
@@ -50,7 +85,7 @@ async fn agents_navigation_requires_local_daemon() -> Result<()> {
 }
 
 #[tokio::test]
-async fn externally_archived_thread_keeps_advertised_agents_navigation() -> Result<()> {
+async fn externally_archived_thread_keeps_agents_navigation_without_hint() -> Result<()> {
     let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut app_server = start_config_write_test_app_server(&app).await?;
@@ -101,7 +136,7 @@ async fn externally_archived_thread_keeps_advertised_agents_navigation() -> Resu
     assert_eq!(app.chat_widget.composer_text_with_pending(), "a!b");
     assert!(
         !std::iter::from_fn(|| events.try_recv().ok())
-            .any(|event| matches!(event, AppEvent::OpenAgentsOverview))
+            .any(|event| matches!(event, AppEvent::OpenCurrentAgentsOverview))
     );
     for key in [
         KeyCode::End.into(),
@@ -111,7 +146,7 @@ async fn externally_archived_thread_keeps_advertised_agents_navigation() -> Resu
             .await?;
     }
     assert!(app.chat_widget.composer_is_empty());
-    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 96).contains("for agents"));
+    assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 96).contains("for agents"));
     app.handle_tui_event(
         &mut tui,
         &mut app_server,
@@ -124,7 +159,7 @@ async fn externally_archived_thread_keeps_advertised_agents_navigation() -> Resu
     .await?;
     assert!(
         !std::iter::from_fn(|| events.try_recv().ok())
-            .any(|event| matches!(event, AppEvent::OpenAgentsOverview))
+            .any(|event| matches!(event, AppEvent::OpenCurrentAgentsOverview))
     );
     app.handle_tui_event(
         &mut tui,
@@ -133,7 +168,7 @@ async fn externally_archived_thread_keeps_advertised_agents_navigation() -> Resu
     )
     .await?;
     let event = events.try_recv()?;
-    assert_matches!(event, AppEvent::OpenAgentsOverview);
+    assert_matches!(event, AppEvent::OpenCurrentAgentsOverview);
     app.handle_event(&mut tui, &mut app_server, event).await?;
     insta::assert_snapshot!(
         "externally_archived_thread_agents",

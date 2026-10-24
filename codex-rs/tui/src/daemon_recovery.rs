@@ -1,31 +1,40 @@
-//! Explicit recovery from local-daemon incompatibility. Restart is managed-only,
-//! requires a fresh confirmation, and is followed by one compatibility check, never a loop.
+//! Client-only compatibility checks report errors; recovery never restarts or falls back.
 
 use crate::AppServerTarget;
+#[cfg(test)]
 use crate::app_event::AppEvent;
+#[cfg(test)]
 use crate::app_event_sender::AppEventSender;
+#[cfg(test)]
 use crate::bottom_pane::BottomPaneView;
+#[cfg(test)]
 use crate::bottom_pane::ListSelectionView;
+#[cfg(test)]
 use crate::bottom_pane::SelectionItem;
+#[cfg(test)]
 use crate::bottom_pane::SelectionViewParams;
 use crate::daemon_startup;
+#[cfg(test)]
 use crate::daemon_startup::CompatibilityError;
+#[cfg(test)]
 use crate::keymap::RuntimeKeymap;
 use crate::legacy_core::config::Config;
+#[cfg(test)]
 use crate::render::renderable::ColumnRenderable;
+#[cfg(test)]
 use crate::render::renderable::Renderable;
 use crate::startup_draft::StartupDraft;
-use crossterm::event::KeyCode;
-use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
+#[cfg(test)]
 use ratatui::style::Stylize;
+#[cfg(test)]
 use ratatui::text::Line;
+#[cfg(test)]
 use ratatui::widgets::Paragraph;
+#[cfg(test)]
 use ratatui::widgets::Wrap;
 use std::io;
-use std::io::IsTerminal;
+#[cfg(test)]
 use tokio::sync::mpsc::unbounded_channel;
-use tokio_stream::StreamExt;
 
 pub(super) async fn check(
     startup: &mut StartupDraft,
@@ -34,108 +43,18 @@ pub(super) async fn check(
     cli_kv_overrides: &[(String, toml::Value)],
     mut managed_daemon: bool,
 ) -> io::Result<Option<String>> {
-    let issue = match startup
+    let _ = managed_daemon;
+    startup
         .run_until(daemon_startup::compatibility_warning(
             target,
             config,
             cli_kv_overrides,
         ))
         .await?
-    {
-        Ok(warning) => return Ok(warning),
-        Err(issue) => issue,
-    };
-    if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
-        return Err(io::Error::other(issue));
-    }
-    if !managed_daemon && issue.restart_features.is_some() {
-        managed_daemon = startup
-            .run_until(codex_app_server_daemon::run(
-                codex_app_server_daemon::LifecycleCommand::Version,
-            ))
-            .await?
-            .is_ok_and(|status| status.backend.is_some());
-    }
-    startup.flush_pending_events().await?;
-    let keymap = RuntimeKeymap::from_config(&config.tui_keymap).map_err(io::Error::other)?;
-    let mut view = recovery_view(&issue, managed_daemon, &keymap);
-    let mut chord_matcher = crate::keymap::KeyChordMatcher::default();
-    let tui = startup.tui_mut();
-    tui.discard_pending_input_before_interactive_screen()?;
-    let selection = {
-        let events = tui.event_stream();
-        tokio::pin!(events);
-        loop {
-            let height = view.desired_height(tui.terminal.size()?.width);
-            tui.draw(height, |frame| {
-                view.render(frame.area(), frame.buffer_mut())
-            })?;
-            let Some(event) = events.next().await else {
-                break None;
-            };
-            tui.screen_size_for_event(&event)?;
-            if matches!(
-                &event,
-                crate::tui::TuiEvent::Paste(_) | crate::tui::TuiEvent::FocusLost
-            ) || matches!(&event, crate::tui::TuiEvent::Mouse(mouse) if mouse.kind != crossterm::event::MouseEventKind::Moved)
-            {
-                chord_matcher.cancel();
-            }
-            if let crate::tui::TuiEvent::Key(key) = event
-                && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-            {
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(key.code, KeyCode::Char('c' | 'd'))
-                {
-                    break None;
-                }
-                let key = match chord_matcher.advance(
-                    key,
-                    &keymap.chords,
-                    crate::keymap::KeymapContextSet::new(crate::keymap::KeymapContext::List),
-                ) {
-                    crate::keymap::KeyChordMatch::PassThrough => key,
-                    crate::keymap::KeyChordMatch::Completed(key) => key,
-                    crate::keymap::KeyChordMatch::Pending(_)
-                    | crate::keymap::KeyChordMatch::Cancelled
-                    | crate::keymap::KeyChordMatch::Ignored => continue,
-                };
-                view.handle_key_event(key);
-            }
-            if view.is_complete() {
-                break view.take_last_selected_index();
-            }
-        }
-    };
-    tui.terminal.clear()?;
-    match (selection, issue.restart_features.as_ref()) {
-        (Some(0), _) => Ok(Some(format!(
-            "Running without the shared background server: {}.",
-            issue.reason
-        ))),
-        (Some(1), Some(features)) if managed_daemon => {
-            tui.with_restored(crate::tui::TerminalHandoff::Restore, || async {
-                crossterm::terminal::disable_raw_mode()?;
-                codex_app_server_daemon::restart_with_features(features)
-                    .await
-                    .map_err(|err| {
-                        io::Error::other(format!("{err:#}\n{}", daemon_startup::FAILURE_HINT))
-                    })
-            })
-            .await?;
-            startup
-                .run_until(daemon_startup::compatibility_warning(
-                    target,
-                    config,
-                    cli_kv_overrides,
-                ))
-                .await?
-                .map_err(io::Error::other)
-        }
-        (Some(_) | None, _) => Err(io::Error::other(issue)),
-    }
+        .map_err(io::Error::other)
 }
 
+#[cfg(test)]
 fn recovery_view(
     issue: &CompatibilityError,
     managed_daemon: bool,

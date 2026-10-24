@@ -1,12 +1,55 @@
-//! Separate persistent transcript context from the composer's transient hint row.
-//! Measurement, rendering, and cursor placement share the same reserved status rectangle.
-//! Shortcut help grows above the input, preserving status and close rows below it even when clipped.
+//! Keep persistent model/context status below input independently of contextual presentation.
+//! Fullscreen context uses the existing composer gap above input and reserves no final hint row.
+//! Measurement and rendering share the persistent status rectangle; shortcut help grows above
+//! input and uses the gap for its close action without adding a contextual row below status.
 
 use super::*;
 
 impl ChatComposer {
+    /// Budget for numbered agent destinations after reserving configured status and the
+    /// same compact right-side indicator used by the footer's width fallback.
+    pub(crate) fn agent_navigation_width(&self, width: u16) -> usize {
+        let area = Rect::new(0, 0, width, 1);
+        let right = if let Some(label) = self.footer.side_conversation_context_label.as_ref() {
+            Some(side_conversation_context_line(label))
+        } else if let Some(line) = self.shell_mode_footer_line() {
+            Some(line)
+        } else if self.footer.status_line_enabled {
+            self.mode_indicator_line(/*show_cycle_hint*/ false)
+        } else {
+            Some(self.right_footer_line_with_context())
+        };
+        let right_width = right.as_ref().map_or(0, |line| line.width() as u16);
+        let left_width = if right_width == 0 {
+            inset_footer_hint_area(area).width
+        } else {
+            max_left_width_for_right(area, right_width)
+                .unwrap_or_else(|| inset_footer_hint_area(area).width)
+        } as usize;
+        let status_width = if self.footer.status_line_enabled {
+            self.footer.status_line_value.as_ref().map_or(0, |line| {
+                if line.width() == 0 {
+                    0
+                } else {
+                    line.width() + 3
+                }
+            })
+        } else {
+            0
+        };
+        // Reserve root even when configured status consumes the row. Rendering shortens status
+        // ahead of the trailing strip; only extremely narrow terminals clip root itself.
+        left_width
+            .saturating_sub(status_width)
+            .max(8)
+            .min(left_width)
+    }
+
     pub(super) fn status_surface_height(&self, options: ComposerRenderOptions<'_>) -> u16 {
-        u16::from(options.separate_status_line && self.footer.status_line_enabled)
+        u16::from(
+            options.separate_status_line
+                && (self.footer.status_line_enabled || options.composer_gap.is_some()),
+        )
     }
 
     pub(super) fn hint_footer_props(&self, options: ComposerRenderOptions<'_>) -> FooterProps {
@@ -38,6 +81,26 @@ impl ChatComposer {
                 FooterMode::ComposerEmpty | FooterMode::ComposerHasDraft
             )
             && options.footer.is_none_or(|footer| !footer.is_interactive);
+        // Without a configured status command, retain the existing context/mode indicators
+        // on the persistent surface rather than removing them with the contextual row.
+        if !self.footer.status_line_enabled {
+            let right = if let Some(label) = self.footer.side_conversation_context_label.as_ref() {
+                side_conversation_context_line(label)
+            } else if let Some(line) = self.shell_mode_footer_line() {
+                line
+            } else {
+                self.right_footer_line_with_context()
+            };
+            if let Some(left) = super::super::footer::mode_indicator_line(
+                self.footer.collaboration_mode_indicator,
+                show_cycle_hint,
+            ) && can_show_left_with_context(area, left.width() as u16, right.width() as u16)
+            {
+                render_footer_line(area, buf, left);
+            }
+            render_context_right(area, buf, &right);
+            return;
+        }
         // Persistent context is independent of help, queue, search, and quit modes.
         props.mode = FooterMode::ComposerHasDraft;
         props.is_task_running = false;
@@ -74,7 +137,11 @@ impl ChatComposer {
             render_footer_line(
                 area,
                 buf,
-                truncate_line_with_ellipsis_if_overflow(line, usize::from(width)),
+                truncate_status_line_preserving_agents(
+                    line,
+                    usize::from(width),
+                    props.active_agent_label.as_ref(),
+                ),
             );
         }
         if let Some(right) = right {

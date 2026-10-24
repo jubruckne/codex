@@ -384,6 +384,17 @@ impl App {
         tui.frame_requester().schedule_frame();
     }
 
+    pub(super) fn quick_switch_target_for_key(&self, key_event: KeyEvent) -> Option<ThreadId> {
+        if !matches!(self.app_server_target, AppServerTarget::LocalDaemon { .. })
+            || self.overlay.is_some()
+            || !self.chat_widget.no_modal_or_popup_active()
+        {
+            return None;
+        }
+        let index = AgentNavigationState::quick_switch_index(key_event)?;
+        self.agent_navigation.quick_switch_thread(index)
+    }
+
     pub(super) async fn handle_key_event(
         &mut self,
         tui: &mut tui::Tui,
@@ -451,6 +462,12 @@ impl App {
                 }
                 return;
             }
+        }
+        if let Some(thread_id) = self.quick_switch_target_for_key(key_event) {
+            let _ = self
+                .select_agent_thread_and_discard_side(tui, app_server, thread_id)
+                .await;
+            return;
         }
         // Some terminals, especially on macOS, encode Option+Left/Right as Option+b/f unless
         // enhanced keyboard reporting is available. We only treat those word-motion fallbacks as
@@ -608,7 +625,7 @@ impl App {
                 && self.chat_widget.agents_navigation_key_available()
                 && !matches!(self.app_server_target, AppServerTarget::Embedded)
             {
-                self.open_agents_overview(app_server);
+                self.open_current_agents_overview(app_server);
             }
             return;
         }
@@ -692,6 +709,10 @@ impl App {
         if self.keymap.app.open_warnings.is_pressed(key_event) {
             self.verify_managed_daemon().await;
             self.chat_widget.open_warnings(&self.transcript_cells);
+            return true;
+        }
+        if self.keymap.app.toggle_agent_feed.is_pressed(key_event) {
+            self.toggle_agent_feed(tui);
             return true;
         }
         let side_toggle_bindings = &self.keymap.app.toggle_side_conversation;

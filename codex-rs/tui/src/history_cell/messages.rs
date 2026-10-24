@@ -322,6 +322,7 @@ fn wrap_user_message(
 
 #[derive(Debug)]
 pub(crate) struct ReasoningSummaryCell {
+    rendered: std::sync::Mutex<Option<(u16, Vec<HyperlinkLine>)>>,
     _header: String,
     content: String,
     /// Session cwd used to render local file links inside the reasoning body.
@@ -352,6 +353,7 @@ impl ReasoningSummaryCell {
     /// cwd active when the summary was recorded.
     pub(crate) fn new(header: String, content: String, cwd: &Path, transcript_only: bool) -> Self {
         Self {
+            rendered: Default::default(),
             _header: header,
             content,
             cwd: cwd.to_path_buf(),
@@ -361,12 +363,23 @@ impl ReasoningSummaryCell {
     }
 
     fn lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        // Reasoning occupies 60% of normal text width, plus its two-column indent.
+        let text_width = usize::from(width.saturating_sub(2)) * 3 / 5;
+        let width = width.min((text_width.max(1) + 2) as u16);
+        if let Some((cached_width, lines)) = self.rendered.lock().unwrap().as_ref()
+            && *cached_width == width
+        {
+            return lines.clone();
+        }
         let lines = crate::markdown_render::render_markdown_lines_with_width_and_cwd(
             &self.content,
             crate::width::usable_content_width_u16(width, /*reserved_cols*/ 2),
             Some(self.cwd.as_path()),
         );
-        let summary_style = Style::default().dim().italic();
+        let summary_style = Style::default()
+            .fg(crate::terminal_palette::best_color((242, 182, 50)))
+            .not_dim()
+            .italic();
         let summary_lines = lines
             .into_iter()
             .map(|mut line| {
@@ -383,12 +396,14 @@ impl ReasoningSummaryCell {
             })
             .collect::<Vec<_>>();
 
-        crate::terminal_hyperlinks::adaptive_wrap_hyperlink_lines(
+        let lines = crate::terminal_hyperlinks::adaptive_wrap_hyperlink_lines(
             &summary_lines,
             RtOptions::new(width as usize)
                 .initial_indent("• ".dim().into())
                 .subsequent_indent("  ".into()),
-        )
+        );
+        *self.rendered.lock().unwrap() = Some((width, lines.clone()));
+        lines
     }
 }
 
@@ -740,70 +755,29 @@ pub(crate) fn new_spoken_user_prompt(message: String) -> UserHistoryCell {
     cell
 }
 
-/// Retain a completed reasoning block in the expanded transcript only.
-/// Activity headings belong to the live status row and must not accumulate in scrollback.
+/// Render supplied reasoning summaries in both normal and expanded transcripts.
+/// Summary headings stay in their Markdown source; status remains a separate compact row.
 ///
 /// The helper snapshots `cwd` into the returned cell so local file links render the same way they
 /// did while the turn was live, even if rendering happens after other app state has advanced. Part
-/// boundaries are preserved so standalone empty placeholders can be removed without changing
-/// literal HTML comments or bold-only summary content.
+/// boundaries, headings, and Markdown source are preserved, including title-only summaries.
 pub(crate) fn new_reasoning_summary_block(
     reasoning_parts: Vec<String>,
     cwd: &Path,
 ) -> Box<ReasoningSummaryCell> {
     let (header, content) = split_reasoning_summary_parts(&reasoning_parts);
     Box::new(ReasoningSummaryCell::new(
-        header, content, cwd, /*transcript_only*/ true,
+        header, content, cwd, /*transcript_only*/ false,
     ))
 }
 
-/// Split structured reasoning-summary parts into the status header and renderable content.
+/// Keep all available summary Markdown, including headings, newlines and code indentation.
 pub(crate) fn split_reasoning_summary_parts(reasoning_parts: &[String]) -> (String, String) {
-    let mut leading_empty_part_header = None;
-    let mut content_parts = Vec::with_capacity(reasoning_parts.len());
-
-    for part in reasoning_parts {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-
-        let header_end = part.strip_prefix("**").and_then(|after_open| {
-            after_open
-                .find("**")
-                .and_then(|close| (close > 0).then_some(close + 4))
-        });
-        let body = header_end.map_or(part, |header_end| &part[header_end..]);
-        if body.trim() == "<!-- -->" {
-            if content_parts.is_empty()
-                && leading_empty_part_header.is_none()
-                && let Some(header_end) = header_end
-            {
-                leading_empty_part_header = Some(part[..header_end].to_string());
-            }
-            continue;
-        }
-
-        content_parts.push(part);
-    }
-
-    let content = content_parts.join("\n\n");
-    if content.is_empty() {
-        return (leading_empty_part_header.unwrap_or_default(), content);
-    }
-
-    if let Some(after_open) = content.strip_prefix("**")
-        && let Some(close) = after_open.find("**")
-    {
-        let after_close_idx = 2 + close + 2;
-        let after_close = &content[after_close_idx..];
-        if after_close.starts_with('\n') || after_close.starts_with('\r') {
-            return (
-                content[..after_close_idx].to_string(),
-                after_close.to_string(),
-            );
-        }
-    }
-
-    (leading_empty_part_header.unwrap_or_default(), content)
+    let content = reasoning_parts
+        .iter()
+        .filter(|part| !part.trim().is_empty())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (String::new(), content)
 }

@@ -7,6 +7,10 @@ Compact:
   └ List missing (exit 1)
     Read index.html
 
+• Inspecting the page
+
+• Checking its contents
+
 • Ran echo boundary
   └ run output
 
@@ -49,6 +53,8 @@ Raw:
 $ ls missing
 list output
 ✗ (1) • 5ms
+Inspecting the page
+Checking its contents
 
 $ cat index.html
 read output

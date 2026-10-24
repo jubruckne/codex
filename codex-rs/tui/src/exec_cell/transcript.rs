@@ -2,9 +2,8 @@
 //! Raw history omits transcript-only reasoning while retaining full command output.
 
 use super::model::ExecCell;
-use crate::exec_command::strip_bash_lc_and_escape;
+use super::native::command_highlights;
 use crate::history_cell::HistoryRenderMode;
-use crate::render::highlight::highlight_bash_to_lines;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::adaptive_wrap_hyperlink_lines;
 use crate::terminal_hyperlinks::plain_hyperlink_lines;
@@ -24,8 +23,8 @@ impl ExecCell {
             if i > 0 {
                 lines.push("".into());
             }
-            let script = strip_bash_lc_and_escape(&call.command);
-            let highlighted_script = highlight_bash_to_lines(&script);
+            let script = self.original_command(call);
+            let highlighted_script = command_highlights(&script);
             let cmd_display = adaptive_wrap_hyperlink_lines(
                 &plain_hyperlink_lines(highlighted_script),
                 RtOptions::new(width as usize)

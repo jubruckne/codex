@@ -1,6 +1,7 @@
 //! Persist the next launch's renderer preference without touching terminal ownership.
 
 use super::App;
+use crate::client_only::ProtectedConfigEdits as _;
 use crate::config_update::format_config_error;
 use crate::legacy_core::config::edit::ConfigEdit;
 use crate::legacy_core::config::edit::ConfigEditsBuilder;
@@ -13,7 +14,7 @@ impl App {
                     segments: vec!["tui".into(), "fullscreen_transcript".into()],
                     value: toml_edit::value(enabled),
                 }])
-                .apply()
+                .reject_shared_config_write()
                 .await;
         match result {
             Ok(()) => {

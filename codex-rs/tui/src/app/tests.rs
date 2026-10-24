@@ -1584,6 +1584,7 @@ async fn replayed_turn_complete_submits_restored_queued_follow_up() {
     while new_op_rx.try_recv().is_ok() {}
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: Vec::new(),
@@ -1649,6 +1650,7 @@ async fn replay_only_thread_keeps_restored_queue_visible() {
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: Vec::new(),
@@ -1702,6 +1704,7 @@ async fn replay_thread_snapshot_keeps_queue_when_running_state_only_comes_from_s
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: Vec::new(),
@@ -1753,6 +1756,7 @@ async fn replay_thread_snapshot_in_progress_turn_restores_running_queue_state() 
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: vec![test_turn("turn-1", TurnStatus::InProgress, Vec::new())],
@@ -1785,6 +1789,7 @@ async fn replay_thread_snapshot_in_progress_turn_restores_running_state_without_
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: vec![test_turn("turn-1", TurnStatus::InProgress, Vec::new())],
@@ -1840,6 +1845,7 @@ async fn replay_thread_snapshot_does_not_submit_queue_before_replay_catches_up()
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: Vec::new(),
@@ -1998,6 +2004,7 @@ async fn replay_thread_snapshot_restores_collaboration_mode_for_draft_submit() {
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: Vec::new(),
@@ -2085,6 +2092,7 @@ async fn replay_thread_snapshot_restores_collaboration_mode_without_input() {
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: Vec::new(),
@@ -2145,6 +2153,7 @@ async fn replayed_interrupted_turn_restores_queued_input_to_composer() {
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: Vec::new(),
@@ -4252,6 +4261,7 @@ async fn replay_snapshot_with_pending_request_retains_warnings_without_covering_
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: Some(test_thread_session(thread_id, test_path_buf("/tmp/main"))),
             turns: Vec::new(),
@@ -4654,6 +4664,7 @@ async fn replayed_file_change_approval_recovers_snapshot_changes() {
     let cwd = test_path_buf("/tmp/project").abs();
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: Some(test_thread_session(thread_id, cwd.clone().into_path_buf())),
             turns: vec![test_turn(
@@ -5617,6 +5628,7 @@ async fn side_thread_snapshot_does_not_refresh_from_fork_history() {
         .insert(side_thread_id, SideThreadState::new(parent_thread_id));
 
     let snapshot = ThreadEventSnapshot {
+        turn_tokens: Default::default(),
         delegated_turns: Vec::new(),
         session: Some(ThreadSessionState {
             rollout_path: None,
@@ -5647,6 +5659,7 @@ async fn side_thread_snapshot_skips_session_header_preamble() {
         .insert(side_thread_id, SideThreadState::new(parent_thread_id));
 
     let snapshot = ThreadEventSnapshot {
+        turn_tokens: Default::default(),
         delegated_turns: Vec::new(),
         session: Some(ThreadSessionState {
             daybreak_enabled: false,
@@ -5832,6 +5845,7 @@ async fn active_side_thread_renders_live_mcp_startup_notifications() {
     app.activate_thread_channel(side_thread_id).await;
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: Some(test_thread_session(
                 side_thread_id,
@@ -6470,6 +6484,7 @@ async fn make_test_app() -> Box<App> {
         agent_navigation: AgentNavigationState::default(),
         pending_server_profiles: HashMap::new(),
         agents_overview: Default::default(),
+        agent_feed: Default::default(),
         side_threads: HashMap::new(),
         abandoned_side_threads: HashSet::new(),
         active_thread_id: None,
@@ -6596,6 +6611,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             agent_navigation: AgentNavigationState::default(),
             pending_server_profiles: HashMap::new(),
             agents_overview: Default::default(),
+        agent_feed: Default::default(),
             side_threads: HashMap::new(),
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
@@ -6987,6 +7003,7 @@ async fn snapshot_thread_switch_discards_queued_previous_history() -> Result<()>
         &app_server,
         next_thread_id,
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: Some(test_thread_session(
                 next_thread_id,
@@ -9100,6 +9117,7 @@ async fn replay_thread_snapshot_replays_turn_history_in_order() {
     let thread_id = ThreadId::new();
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: Some(test_thread_session(
                 thread_id,
@@ -9220,6 +9238,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: None,
             turns: Vec::new(),
@@ -9297,6 +9316,7 @@ async fn refreshed_snapshot_session_persists_resumed_turns() {
         ..initial_session.clone()
     };
     let mut snapshot = ThreadEventSnapshot {
+        turn_tokens: Default::default(),
         delegated_turns: Vec::new(),
         session: Some(initial_session),
         turns: Vec::new(),

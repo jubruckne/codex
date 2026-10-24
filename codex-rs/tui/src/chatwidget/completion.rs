@@ -43,7 +43,9 @@ impl ChatWidget {
         let cell = history_cell::FinalMessageSeparator::new(
             elapsed_seconds,
             /*runtime_metrics*/ None,
-        );
+        )
+        .with_token_usage(self.status_state.turn_tokens.snapshot_counts(&turn.id))
+        .with_context_growth(self.status_state.turn_tokens.snapshot_context_growth(&turn.id));
         Some(match completed_at {
             Some(completed_at) => {
                 cell.with_completed_at(completed_at, crate::clock_format::ClockFormat::system())

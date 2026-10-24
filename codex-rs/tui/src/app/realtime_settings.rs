@@ -1,6 +1,7 @@
 //! Persist server voice preferences and machine-local audio selections before updating the UI.
 
 use super::*;
+use crate::client_only::ProtectedConfigEdits as _;
 use crate::legacy_core::config::edit::ConfigEdit;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::RequestId;
@@ -98,7 +99,7 @@ impl App {
         if let Err(error) =
             ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                 .with_edits(edits)
-                .apply()
+                .reject_shared_config_write()
                 .await
         {
             self.chat_widget

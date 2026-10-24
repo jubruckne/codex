@@ -4979,8 +4979,8 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                       Select an agent to watch. ⌥← previous, ⌥→ next.
 
 
-                    › 1. • Main [default] (current)  [root]
-                      2. • /root/worker              [child]
+                    › 1. • root (current)  [root]
+                      2. • /root/worker    [child]
 
                       enter select · esc back
                     "###

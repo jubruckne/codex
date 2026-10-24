@@ -48,6 +48,7 @@ use super::shortcut_overlay;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::ShortcutHint;
+use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::render::line_utils::prefix_lines;
 use crate::status::format_tokens_compact;
 use crate::style::secondary_text_style;
@@ -89,7 +90,7 @@ pub(crate) struct FooterProps {
     ///
     /// When both this label and the configured status line are available, they are rendered on the
     /// same row separated by ` · `.
-    pub(crate) active_agent_label: Option<String>,
+    pub(crate) active_agent_label: Option<Line<'static>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -339,13 +340,6 @@ fn left_side_line(
     match state.hint {
         SummaryHintKind::None => {}
         SummaryHintKind::Shortcuts => {
-            if let Some(key) = key_hints.agents {
-                line.extend(key.spans());
-                line.push_span(" for agents".set_style(secondary_text_style()));
-                if key_hints.toggle_shortcuts.is_some() {
-                    line.push_span(" · ".set_style(secondary_text_style()));
-                }
-            }
             if let Some(key) = key_hints.toggle_shortcuts {
                 line.extend(key.spans());
                 line.push_span(" for shortcuts".set_style(secondary_text_style()));
@@ -839,25 +833,38 @@ pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'st
 
     if let Some(active_agent_label) = props.active_agent_label.as_ref() {
         if let Some(existing) = line.as_mut() {
-            existing.spans.push(" · ".set_style(secondary_text_style()));
-            existing
-                .spans
-                .push(active_agent_label.clone().set_style(secondary_text_style()));
+            existing.push_span(" · ".set_style(secondary_text_style()));
+            existing.extend(active_agent_label.spans.clone());
         } else {
-            line = Some(Line::from(active_agent_label.clone()).set_style(secondary_text_style()));
+            line = Some(active_agent_label.clone());
         }
     }
 
-    if props.mode == FooterMode::ComposerEmpty
-        && let Some(key) = props.key_hints.agents
-        && let Some(line) = line.as_mut()
-    {
-        line.push_span(" · ".set_style(secondary_text_style()));
-        line.extend(key.spans());
-        line.push_span(" for agents".set_style(secondary_text_style()));
-    }
-
     line
+}
+
+/// Preserve the trailing agent destinations while shortening configured status text ahead of
+/// them. Slot allocation already fits the strip to this row; only tiny terminals clip root.
+pub(crate) fn truncate_status_line_preserving_agents(
+    line: Line<'static>,
+    width: usize,
+    agent_label: Option<&Line<'static>>,
+) -> Line<'static> {
+    if line.width() <= width {
+        return line;
+    }
+    if let Some(agents) = agent_label {
+        let status_width = width.saturating_sub(agents.width() + 3);
+        if status_width == 0 {
+            return truncate_line_with_ellipsis_if_overflow(agents.clone(), width);
+        }
+        let mut status = truncate_line_with_ellipsis_if_overflow(line, status_width);
+        status.push_span(" · ".set_style(secondary_text_style()));
+        status.extend(agents.spans.clone());
+        status
+    } else {
+        truncate_line_with_ellipsis_if_overflow(line, width)
+    }
 }
 
 /// Whether the current footer mode allows contextual information to replace instructional hints.
@@ -974,7 +981,6 @@ pub(crate) fn context_window_line(percent: Option<i64>, used_tokens: Option<i64>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
     use crate::test_backend::VT100Backend;
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
@@ -1086,7 +1092,11 @@ mod tests {
                         FooterMode::ComposerEmpty | FooterMode::ComposerHasDraft
                     ) {
                     passive_status_line.as_ref().map(|line| {
-                        truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
+                        truncate_status_line_preserving_agents(
+                            line.clone(),
+                            available_width,
+                            props.active_agent_label.as_ref(),
+                        )
                     })
                 } else {
                     None
@@ -1135,7 +1145,11 @@ mod tests {
                     && let Some(max_left) = max_left_width_for_right(area, right_width)
                     && left_width > max_left
                     && let Some(line) = passive_status_line.as_ref().map(|line| {
-                        truncate_line_with_ellipsis_if_overflow(line.clone(), max_left as usize)
+                        truncate_status_line_preserving_agents(
+                            line.clone(),
+                            max_left as usize,
+                            props.active_agent_label.as_ref(),
+                        )
                     })
                 {
                     left_width = line.width() as u16;
@@ -1671,7 +1685,9 @@ mod tests {
             status_line_value: None,
             status_line_enabled: false,
             key_hints: FooterKeyHints::default_bindings(),
-            active_agent_label: Some("Robie [explorer]".to_string()),
+            active_agent_label: Some(
+                Line::from("Robie [explorer]".to_string()).set_style(secondary_text_style()),
+            ),
         };
 
         snapshot_footer("footer_active_agent_label", props);
@@ -1687,7 +1703,9 @@ mod tests {
             status_line_value: Some(Line::from("Status line content".to_string())),
             status_line_enabled: true,
             key_hints: FooterKeyHints::default_bindings(),
-            active_agent_label: Some("Robie [explorer]".to_string()),
+            active_agent_label: Some(
+                Line::from("Robie [explorer]".to_string()).set_style(secondary_text_style()),
+            ),
         };
 
         snapshot_footer("footer_status_line_with_active_agent_label", props);

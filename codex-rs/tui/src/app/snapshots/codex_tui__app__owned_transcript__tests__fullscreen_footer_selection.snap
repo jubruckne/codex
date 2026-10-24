@@ -1,6 +1,6 @@
 ---
 source: tui/src/app/owned_transcript_tests.rs
-assertion_line: 1831
+assertion_line: 1853
 expression: "normalize_snapshot_paths(buffer_text(crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal)))"
 ---
 
@@ -21,9 +21,9 @@ expression: "normalize_snapshot_paths(buffer_text(crate::custom_terminal::test_s
 
 
 
-                                                    Selecting text · esc cancel
+
+                                                        ⚠ 1 warning · f2 to view
 
 › draft stays here
 
   GPT-5.6-Sol default · /tmp/project
-                                                       ⚠ 1 warning · f2 to view

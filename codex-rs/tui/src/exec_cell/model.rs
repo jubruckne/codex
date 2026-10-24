@@ -79,13 +79,43 @@ pub(crate) struct ExecCall {
 pub(crate) struct ExecCell {
     pub(crate) group: ActivityGroup<ExecCall>,
     animations_enabled: bool,
+    pub(super) native_presentation: bool,
+    pub(super) native_committed: bool,
+    pub(super) native_frame_requester: Option<crate::tui::FrameRequester>,
+    pub(crate) reported_exit_codes: std::collections::HashMap<String, Option<i32>>,
+    pub(crate) original_commands: std::collections::HashMap<String, String>,
 }
 
 impl ExecCell {
+    pub(crate) fn configure_native(
+        &mut self,
+        enabled: bool,
+        requester: Option<crate::tui::FrameRequester>,
+        committed: bool,
+    ) {
+        self.native_presentation = enabled;
+        self.native_frame_requester = enabled.then_some(requester).flatten();
+        self.native_committed = committed;
+    }
+
+    pub(crate) fn remember_exit_code(&mut self, id: &str, exit_code: Option<i32>) {
+        self.reported_exit_codes.insert(id.to_owned(), exit_code);
+    }
+
+    pub(crate) fn remember_original_command(&mut self, id: &str, command: &str) {
+        self.original_commands
+            .insert(id.to_string(), command.to_string());
+    }
+
     pub(crate) fn new(call: ExecCall, animations_enabled: bool) -> Self {
         Self {
             group: ActivityGroup::new(vec![call]),
             animations_enabled,
+            native_presentation: false,
+            native_committed: false,
+            native_frame_requester: None,
+            original_commands: Default::default(),
+            reported_exit_codes: Default::default(),
         }
     }
 
@@ -97,6 +127,9 @@ impl ExecCell {
         source: ExecCommandSource,
         interaction_input: Option<String>,
     ) -> bool {
+        if self.native_presentation && self.native_committed {
+            return false;
+        }
         let call = ExecCall {
             call_id,
             command,
@@ -107,7 +140,16 @@ impl ExecCell {
             duration: None,
             interaction_input,
         };
-        if self.is_exploring_cell() && Self::is_exploring_call(&call) {
+        if (self.native_presentation
+            && !self.native_committed
+            && self
+                .group
+                .calls
+                .iter()
+                .all(|call| call.source != ExecCommandSource::UnifiedExecInteraction)
+            && source != ExecCommandSource::UnifiedExecInteraction)
+            || (self.is_exploring_cell() && Self::is_exploring_call(&call))
+        {
             self.group.calls.push(call);
             true
         } else {
@@ -126,11 +168,15 @@ impl ExecCell {
         );
         self.group.details = newer.group.details;
         self.group.calls.append(&mut newer.group.calls);
+        self.original_commands.extend(newer.original_commands);
+        self.reported_exit_codes.extend(newer.reported_exit_codes);
         Ok(())
     }
 
     /// Preserve live clocks and pending output when a validated older page extends exploration.
     pub(crate) fn prepend(&mut self, older: Self) {
+        self.original_commands.extend(older.original_commands);
+        self.reported_exit_codes.extend(older.reported_exit_codes);
         self.group.prepend(older.group);
     }
 

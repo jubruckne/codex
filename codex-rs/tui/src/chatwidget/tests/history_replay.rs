@@ -1280,7 +1280,9 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
         }
         other => panic!("expected InsertHistoryCell, got {other:?}"),
     };
-    assert_eq!(rendered, "• done\n");
+    assert!(rendered.contains("Plan"));
+    assert!(rendered.contains("done"));
+    assert!(rendered.contains("Checking tests"));
     assert!(!rendered.contains("Raw reasoning"));
 }
 
@@ -1641,7 +1643,9 @@ async fn live_reasoning_summary_drops_empty_parts_without_losing_content() {
         }
         other => panic!("expected InsertHistoryCell, got {other:?}"),
     };
-    assert_eq!(rendered, "• done\n");
+    assert!(rendered.contains("Plan"));
+    assert!(rendered.contains("done"));
+    assert!(rendered.contains("Checking tests"));
 }
 
 #[tokio::test]
@@ -1786,7 +1790,7 @@ async fn thread_snapshot_replayed_stream_recovery_restores_previous_status_heade
     assert_eq!(chat.status_state.current_status.header, "Working");
     assert_eq!(chat.status_state.current_status.details, None);
     assert!(chat.status_state.retry_status_header.is_none());
-    assert!(chat.bottom_pane.status_widget().is_none());
+    assert!(chat.bottom_pane.status_widget().is_some());
     assert!(chat.active_cell_is_stream_tail());
 }
 
@@ -1806,6 +1810,6 @@ async fn stream_recovery_restores_previous_status_header() {
     assert_eq!(chat.status_state.current_status.header, "Working");
     assert_eq!(chat.status_state.current_status.details, None);
     assert!(chat.status_state.retry_status_header.is_none());
-    assert!(chat.bottom_pane.status_widget().is_none());
+    assert!(chat.bottom_pane.status_widget().is_some());
     assert!(chat.active_cell_is_stream_tail());
 }

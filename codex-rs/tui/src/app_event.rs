@@ -295,6 +295,8 @@ pub(crate) struct AgentPickerThreadRefresh {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    AgentFeedSemantic(crate::app::agent_feed::semantic::Event),
+    AgentFeedReady { root: ThreadId, generation: u64, snapshot: crate::app::agent_feed::FeedSnapshot },
     AccountEmailLoaded {
         request_id: uuid::Uuid,
         email: Option<String>,
@@ -314,6 +316,8 @@ pub(crate) enum AppEvent {
     CloseMisalignmentReview,
     /// Open the live command center for recent and locally retained root sessions.
     OpenAgentsOverview,
+    /// Open the current root and its descendants from Left or /subagents.
+    OpenCurrentAgentsOverview,
     ShowMoreAgentsOverview,
     /// Create an empty thread from the command center.
     NewAgentsOverviewSession {
@@ -802,6 +806,13 @@ pub(crate) enum AppEvent {
     RefreshThreadUsage {
         thread_id: ThreadId,
         request_id: u64,
+    },
+
+    /// Read-only context estimate, routed to the requesting thread and widget generation.
+    ContextSummaryLoaded {
+        thread_id: ThreadId,
+        request_id: Uuid,
+        result: Result<crate::context_summary::ContextSummaryCell, String>,
     },
 
     /// Result of fetching backend-estimated usage for a specific thread.

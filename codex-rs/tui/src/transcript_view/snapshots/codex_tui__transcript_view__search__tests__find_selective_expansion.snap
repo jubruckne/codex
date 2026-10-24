@@ -3,18 +3,18 @@ source: tui/src/transcript_view/search_tests.rs
 assertion_line: 989
 expression: "crate::transcript_view::tests::text(&buffer)"
 ---
-• Running 'echo visible …
-  └ (no output)
-    + Show details
+• Ran 'echo visible'
+    + 1 line (⌃t to expand)
 
-• Running 'echo visible …
-  └ (no output)
-    + Show details
+• Ran 'echo visible'
+    + 1 line (⌃t to expand)
 
-$ 'echo visible
-    echo hidden newer needle'
-    − Hide details
+$ 'echo visible'
+echo hidden newer needle
+✓ • 1.00s
+    − Show less
 
-$ 'echo visible
-    echo hidden manual'
-    − Hide details
+$ 'echo visible'
+echo hidden manual
+✓ • 1.00s
+    − Show less

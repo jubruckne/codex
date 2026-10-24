@@ -1,6 +1,7 @@
 //! App-level handlers for ambient terminal pet events.
 
 use super::*;
+use crate::client_only::ProtectedConfigEdits as _;
 
 impl App {
     pub(super) fn disable_ambient_pet_before_shutdown(&mut self, tui: &mut tui::Tui) -> Result<()> {
@@ -106,7 +107,7 @@ impl App {
         let edit = crate::legacy_core::config::edit::tui_pet_edit(crate::pets::DISABLED_PET_ID);
         let apply_result = ConfigEditsBuilder::new(&self.local_settings.codex_home)
             .with_edits([edit])
-            .apply()
+            .reject_shared_config_write()
             .await;
         match apply_result {
             Ok(()) => {
@@ -149,7 +150,7 @@ impl App {
                 let edit = crate::legacy_core::config::edit::tui_pet_edit(&pet_id);
                 match ConfigEditsBuilder::new(&self.local_settings.codex_home)
                     .with_edits([edit])
-                    .apply()
+                    .reject_shared_config_write()
                     .await
                 {
                     Ok(()) => {

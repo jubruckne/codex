@@ -8,12 +8,11 @@ use std::sync::Arc;
 
 #[allow(dead_code, reason = "Used by later layers of the TUI refresh stack.")]
 pub(crate) fn is_hidden_activity_detail(cell: &Arc<dyn HistoryCell>) -> bool {
-    cell.as_any()
-        .downcast_ref::<ReasoningSummaryCell>()
-        .is_some_and(ReasoningSummaryCell::is_transcript_only)
+    cell.as_any().is::<ReasoningSummaryCell>()
 }
 
 /// Fold standalone reasoning using exact persisted identities from one turn.
+/// Visible summaries remain ordered group details, preserving pending calls during pagination.
 ///
 /// An older page can arrive after the final reasoning page even with no newer group or live tail.
 /// Rebuild only known completed calls and share their immutable details; never infer adjacency
@@ -43,9 +42,6 @@ pub(crate) fn fold_trailing_activity_details(
     let count = ids.len();
     for detail in details {
         let detail = detail.as_any().downcast_ref::<ReasoningSummaryCell>()?;
-        if !detail.is_transcript_only() {
-            return None;
-        }
         ids.push(detail.source_item_id()?);
     }
     let items = super::computer_groups::adjacent_activity_items(&ids, turns)?;

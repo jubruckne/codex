@@ -246,6 +246,7 @@ mod clipboard;
 mod footer_selection;
 mod native_history;
 mod owned_transcript;
+pub(crate) mod agent_feed;
 mod pending_interactive_replay;
 mod permission_shortcuts;
 mod pets;
@@ -291,7 +292,7 @@ mod warnings_tests;
 mod working_directory;
 
 use self::agent_navigation::AgentNavigationDirection;
-use self::agent_navigation::AgentNavigationState;
+pub(crate) use self::agent_navigation::AgentNavigationState;
 use self::app_server_requests::PendingAppServerRequests;
 use self::loaded_threads::find_loaded_subagent_threads_for_primary;
 use self::pending_interactive_replay::PendingInteractiveReplayState;
@@ -639,6 +640,7 @@ pub(crate) struct App {
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
     agents_overview: agents_overview::AgentsOverviewState,
+    agent_feed: agent_feed::AgentFeed,
     side_threads: HashMap<ThreadId, SideThreadState>,
     abandoned_side_threads: HashSet<ThreadId>,
     active_thread_id: Option<ThreadId>,
@@ -887,6 +889,12 @@ impl App {
             self.chat_widget.acknowledge_program_status();
         }
         let idle_draw = matches!(event, TuiEvent::Draw);
+        if matches!(event, TuiEvent::Draw | TuiEvent::Resize(_)) {
+            self.tick_agent_feed(tui, app_server);
+        }
+        if self.handle_agent_feed_event(tui, &event) {
+            return Ok(AppRunControl::Continue);
+        }
         if self.handle_rendered_selection_event(tui, &event)? {
             return Ok(AppRunControl::Continue);
         }
@@ -1058,7 +1066,11 @@ impl App {
                     || (crate::key_hint::plain(KeyCode::Left).is_press(*key)
                         && self.chat_widget.agents_navigation_key_available()))
             {
-                self.open_agents_overview(app_server);
+                if crate::key_hint::plain(KeyCode::Left).is_press(*key) {
+                    self.open_current_agents_overview(app_server);
+                } else {
+                    self.open_agents_overview(app_server);
+                }
             } else if self
                 .chat_widget
                 .active_view_accepts_input_when_disconnected()
@@ -1229,6 +1241,10 @@ impl App {
     }
 
     fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui, screen_size: Size) -> Result<Rect> {
+        self.sync_agent_feed_root();
+        let agent_width = self.chat_widget.agent_navigation_width(screen_size.width);
+        self.agent_navigation.set_quick_switch_width(agent_width);
+        self.sync_agent_navigation_strip();
         self.chat_widget
             .set_sparkle_terminal_focus(tui.is_terminal_focused());
         if tui.is_owned_screen() {

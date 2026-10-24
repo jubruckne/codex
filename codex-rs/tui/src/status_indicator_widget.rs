@@ -1,7 +1,7 @@
 //! A live task status row rendered above the composer while the agent is busy.
 //!
 //! The row renders a separately owned clock, the optional interrupt hint, and short inline
-//! context (for example, the unified-exec background-process summary). Keeping
+//! reported current-turn token totals and context (for example, background-process summaries). Keeping
 //! these pieces on one line avoids vertical layout churn in the bottom pane.
 //! Hook activity uses the remaining space or its own line on overflow, so it
 //! never displaces background-process controls.
@@ -55,6 +55,7 @@ pub(crate) enum StatusDetailsCapitalization {
 pub(crate) struct StatusIndicatorWidget {
     /// Animated header text (defaults to "Working").
     header: String,
+    turn_tokens: Option<(i64, i64)>,
     header_started_at: Instant,
     details: Option<String>,
     details_max_lines: usize,
@@ -97,6 +98,7 @@ impl StatusIndicatorWidget {
     ) -> Self {
         Self {
             header: String::from("Working"),
+            turn_tokens: None,
             header_started_at: Instant::now(),
             details: None,
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
@@ -109,6 +111,10 @@ impl StatusIndicatorWidget {
             animations_enabled,
             effects,
         }
+    }
+
+    pub(crate) fn update_turn_tokens(&mut self, tokens: Option<(i64, i64)>) {
+        self.turn_tokens = tokens;
     }
 
     pub(crate) fn interrupt(&self) {
@@ -254,14 +260,22 @@ impl StatusIndicator<'_> {
         if !spans.is_empty() {
             spans.push(" ".into());
         }
-        if row.show_interrupt_hint
-            && let Some(interrupt_binding) = row.interrupt_binding
-        {
-            spans.push(format!("({pretty_elapsed} • ").dim());
-            spans.extend(interrupt_binding.spans());
-            spans.push(" to interrupt)".dim());
-        } else {
-            spans.push(format!("({pretty_elapsed})").dim());
+        let elapsed_index = spans.len();
+        spans.push(format!("({pretty_elapsed})").dim());
+        if let Some((input, output)) = row.turn_tokens {
+            let tokens = format!(
+                " · ↑ {} ↓ {}",
+                crate::token_usage::compact_turn_tokens(input),
+                crate::token_usage::compact_turn_tokens(output)
+            );
+            let core_width = line_width(&Line::from(spans.clone()));
+            if core_width + display_width(&tokens) <= usize::from(width) {
+                let elapsed = &mut spans[elapsed_index];
+                elapsed.content = elapsed
+                    .content
+                    .replace(&pretty_elapsed, &format!("{pretty_elapsed}{tokens}"))
+                    .into();
+            }
         }
         if let Some(message) = &row.inline_message {
             // Keep optional context after elapsed/interrupt text so that core
@@ -454,7 +468,57 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        assert!(line.starts_with("Working (0s • esc to interrupt)"));
+        assert!(line.starts_with("Working (0s)"));
+    }
+
+    #[test]
+    fn turn_tokens_resize_preserves_elapsed_and_remapped_interrupt() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let mut row = StatusIndicatorWidget::new(
+            AppEventSender::new(tx),
+            crate::tui::FrameRequester::test_dummy(),
+            false,
+            Default::default(),
+        );
+        row.update_turn_tokens(Some((42_300, 128)));
+        row.set_interrupt_binding(Some(key_hint::plain(KeyCode::F(12)).into()));
+        let mut timer = StatusTimer::default();
+        timer.pause_at(timer.last_resume_at);
+        timer.reset(Duration::from_secs(43));
+        for width in [80, 34, 80] {
+            let lines = StatusIndicator {
+                row: &row,
+                timer: &timer,
+            }
+            .lines(width);
+            let text = lines[0].to_string();
+            assert!(text.contains("Working (43s"));
+            assert!(!text.contains("to interrupt"));
+            assert_eq!(text.contains("↑ 42.3k ↓ 128"), width >= 34);
+            assert!(lines[0].width() <= usize::from(width));
+        }
+    }
+
+    #[test]
+    fn unified_overview_status_phases_preserve_tokens_and_interrupt_action() {
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let mut row = StatusIndicatorWidget::new(AppEventSender::new(tx),
+            crate::tui::FrameRequester::test_dummy(), false, Default::default());
+        row.update_turn_tokens(Some((12_400, 2_100)));
+        row.set_interrupt_hint_visible(true);
+        let mut timer = StatusTimer::default();
+        timer.pause_at(timer.last_resume_at);
+        for phase in ["Thinking", "Running tools", "Compacting context", "Waiting for agent"] {
+            row.update_header(phase.into());
+            let text = StatusIndicator { row: &row, timer: &timer }.lines(80)[0].to_string();
+            assert!(text.contains(phase));
+            assert!(text.contains("↑ 12.4k ↓ 2.1k"));
+            assert!(!text.contains("to interrupt"));
+        }
+        row.interrupt();
+        assert!(matches!(rx.try_recv(), Ok(AppEvent::CodexOp(_))));
+        row.update_turn_tokens(None);
+        assert!(!StatusIndicator { row: &row, timer: &timer }.lines(80)[0].to_string().contains('↑'));
     }
 
     #[test]
@@ -504,7 +568,7 @@ mod tests {
             ),
         ] {
             w.update_inline_message(background.map(str::to_string));
-            let mut expected = "Working (0s • esc to interrupt)".to_string();
+            let mut expected = "Working (0s)".to_string();
             if let Some(background) = background {
                 expected.push_str(&format!(" · {background}"));
             }

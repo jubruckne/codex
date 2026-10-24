@@ -75,7 +75,7 @@ fn left_navigates_only_from_an_empty_prompt() {
     }
     assert!(events.try_recv().is_err());
     composer.handle_key_event(KeyCode::Left.into());
-    assert_matches!(events.try_recv(), Ok(AppEvent::OpenAgentsOverview));
+    assert_matches!(events.try_recv(), Ok(AppEvent::OpenCurrentAgentsOverview));
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn left_respects_attachments_pastes_and_other_input_surfaces() {
         composer.handle_key_event(KeyCode::Left.into());
         assert!(
             !std::iter::from_fn(|| events.try_recv().ok())
-                .any(|event| matches!(event, AppEvent::OpenAgentsOverview))
+                .any(|event| matches!(event, AppEvent::OpenCurrentAgentsOverview))
         );
     }
 }
@@ -154,6 +154,28 @@ fn left_respects_editor_and_vim_history_remaps() {
         assert!(composer.footer_props().key_hints.agents.is_none());
         composer.handle_key_event(KeyCode::Left.into());
         assert_eq!(composer.current_text(), "previous");
+        assert!(events.try_recv().is_err());
+    }
+}
+
+#[test]
+fn unified_overview_right_is_only_editor_navigation() {
+    for vim in [false, true] {
+        let (mut composer, mut events) = new_test_composer();
+        composer.set_agents_navigation_enabled(true);
+        composer.set_vim_enabled(vim);
+        composer.handle_key_event(KeyCode::Right.into());
+        assert!(events.try_recv().is_err());
+        composer.handle_key_event(KeyCode::Left.into());
+        assert_matches!(events.try_recv(), Ok(AppEvent::OpenCurrentAgentsOverview));
+        if vim {
+            composer.handle_key_event(KeyCode::Char('i').into());
+        }
+        composer.insert_str("ab");
+        composer.handle_key_event(KeyCode::Left.into());
+        composer.handle_key_event(KeyCode::Right.into());
+        composer.insert_str("!");
+        assert_eq!(composer.current_text(), "ab!");
         assert!(events.try_recv().is_err());
     }
 }

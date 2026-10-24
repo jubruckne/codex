@@ -8,9 +8,6 @@ use crate::legacy_core::config::Config;
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
 use crate::legacy_core::config::ConfigTomlLoadResult;
-use crate::legacy_core::config::bootstrap_auth_config;
-use crate::legacy_core::config::edit::ConfigEdit;
-use crate::legacy_core::config::edit::ConfigEditsBuilder;
 use crate::legacy_core::config::load_config_toml_with_layer_stack;
 #[cfg(test)]
 use crate::legacy_core::config::resolve_bootstrap_http_client_factory;
@@ -34,12 +31,14 @@ use app_server_session::ThreadParamsMode;
 use codex_app_server_client::AppServerClient;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
 use codex_app_server_client::InProcessAppServerClient;
+#[cfg(test)]
 use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::RemoteAppServerClient;
 use codex_app_server_client::RemoteAppServerConnectArgs;
 pub use codex_app_server_client::RemoteAppServerEndpoint;
 use codex_app_server_protocol::Account as AppServerAccount;
 use codex_app_server_protocol::AskForApproval;
+#[cfg(test)]
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::Thread as AppServerThread;
@@ -60,7 +59,6 @@ use codex_features::Feature;
 use codex_login::AuthConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
-use codex_login::enforce_login_restrictions;
 use codex_login::is_workload_identity_selected;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
@@ -124,6 +122,7 @@ mod bottom_pane;
 mod branch_summary;
 mod chatwidget;
 mod cli;
+mod client_only;
 mod clipboard_copy;
 mod clipboard_html;
 mod clipboard_paste;
@@ -132,6 +131,7 @@ mod collaboration_modes;
 mod color;
 mod config_panel;
 mod config_update;
+mod context_summary;
 mod copy_input_guard;
 pub(crate) mod custom_terminal;
 mod daybreak;
@@ -263,6 +263,9 @@ mod updates;
 mod updates_cache;
 mod user_prompt;
 mod version;
+pub use version::CODEX_PLUS_IDENTITY;
+pub use version::CODEX_PLUS_NAME;
+pub use version::CODEX_PLUS_VERSION_SUFFIX;
 mod vim_search;
 mod width;
 mod windows_sandbox;
@@ -297,7 +300,7 @@ const INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(/*mill
 const AUTO_CONNECT_DAEMON_CONNECT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(50);
 
-#[allow(clippy::too_many_arguments)]
+#[allow(unused_variables, clippy::too_many_arguments)]
 async fn start_embedded_app_server(
     arg0_paths: Arg0DispatchPaths,
     config: Config,
@@ -311,6 +314,16 @@ async fn start_embedded_app_server(
     environment_manager: Arc<EnvironmentManager>,
     embedded_network_policy: codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> color_eyre::Result<InProcessAppServerClient> {
+    #[cfg(not(test))]
+    color_eyre::eyre::bail!(
+        "Embedded execution is disabled in Codex++; start the official daemon with codex."
+    );
+    #[cfg(test)]
+    #[cfg(not(test))]
+    color_eyre::eyre::bail!(
+        "Embedded execution is disabled in Codex++; use the official Codex CLI for this operation."
+    );
+    #[cfg(test)]
     // Keep embedded startup state off the caller's stack during session transitions.
     Box::pin(start_embedded_app_server_with(
         arg0_paths,
@@ -414,6 +427,8 @@ async fn init_state_db_for_app_server_target(
     config: &Config,
     app_server_target: &AppServerTarget,
 ) -> std::io::Result<Option<StateDbHandle>> {
+    #[cfg(not(test))]
+    crate::client_only::validate_target(app_server_target)?;
     match app_server_target {
         AppServerTarget::Embedded => state_db::try_init(config).await.map(Some).map_err(|err| {
             let database_path = codex_state::runtime_db_path_for_corruption_error(&err)
@@ -421,7 +436,8 @@ async fn init_state_db_for_app_server_target(
             std::io::Error::other(LocalStateDbStartupError::new(database_path, err))
         }),
         AppServerTarget::LocalDaemon { .. } | AppServerTarget::Remote { .. } => {
-            Ok(state_db::get_state_db(config).await)
+            // Opening shared SQLite via StateRuntime::init can migrate its schema.
+            Ok(None)
         }
     }
 }
@@ -534,7 +550,9 @@ async fn connect_remote_app_server(
     })
     .await
     .wrap_err("failed to connect to remote app server")?;
-    Ok(AppServerClient::Remote(app_server))
+    Ok(AppServerClient::Remote(
+        app_server.with_request_filter(crate::client_only::filter_request),
+    ))
 }
 
 async fn maybe_probe_default_daemon_socket(codex_home: &Path) -> Option<AbsolutePathBuf> {
@@ -589,37 +607,7 @@ async fn start_app_server(
     environment_manager: Arc<EnvironmentManager>,
     embedded_network_policy: codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> color_eyre::Result<AppServerClient> {
-    let connection = if matches!(target, AppServerTarget::Embedded) {
-        None
-    } else {
-        Some(app_server_connection::connect(target).await)
-    };
-    if let Some(connection) = connection {
-        match connection {
-            Ok(app_server) => return Ok(app_server),
-            Err(err)
-                if matches!(
-                    target,
-                    AppServerTarget::LocalDaemon {
-                        allow_embedded_fallback: true,
-                        ..
-                    }
-                ) =>
-            {
-                tracing::debug!(%err, "local daemon connection failed; starting embedded app server");
-                *target = AppServerTarget::Embedded;
-                *state_db = init_state_db_for_app_server_target(&config, target).await?;
-            }
-            Err(err) if matches!(target, AppServerTarget::LocalDaemon { .. }) => {
-                return Err(color_eyre::eyre::eyre!(
-                    "{err:#}\n{}",
-                    daemon_startup::FAILURE_HINT
-                ));
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    start_embedded_app_server(
+    let _ = (
         arg0_paths,
         config,
         cli_kv_overrides,
@@ -628,12 +616,11 @@ async fn start_app_server(
         cloud_config_bundle,
         feedback,
         log_db,
-        state_db.clone(),
+        state_db,
         environment_manager,
         embedded_network_policy,
-    )
-    .await
-    .map(AppServerClient::InProcess)
+    );
+    app_server_connection::connect(target).await
 }
 
 pub(crate) async fn start_app_server_for_picker(
@@ -682,32 +669,17 @@ pub(crate) async fn start_app_server_for_picker(
 pub(crate) async fn start_embedded_app_server_for_picker(
     config: &Config,
 ) -> color_eyre::Result<AppServerSession> {
-    let mut target = AppServerTarget::Embedded;
-    let mut state_db = init_state_db_for_app_server_target(config, &target).await?;
-    // Keep the shared test fixture's frame independent of embedded startup size.
-    let app_server = Box::pin(start_app_server(
-        &mut target,
-        Arg0DispatchPaths::default(),
-        config.clone(),
-        Vec::new(),
-        LoaderOverrides::without_managed_config_for_tests(),
-        /*strict_config*/ false,
-        CloudConfigBundleLoader::default(),
-        codex_feedback::CodexFeedback::new(),
-        /*log_db*/ None,
-        &mut state_db,
-        Arc::new(EnvironmentManager::default_for_tests()),
-        Default::default(),
-    ))
-    .await?;
+    // Disposable upstream unit-test fixture, absent from the installed executable.
+    let client = tests::start_test_embedded_app_server(config.clone()).await?;
     Ok(AppServerSession::new(
         crate::backend_id::BackendId::new(),
-        app_server,
-        target.thread_params_mode(),
+        AppServerClient::InProcess(client),
+        ThreadParamsMode::Embedded,
     )
     .with_local_codex_home(&config.codex_home))
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn start_embedded_app_server_with<F, Fut>(
     arg0_paths: Arg0DispatchPaths,
@@ -1068,35 +1040,21 @@ fn app_server_target_for_launch(
     workload_identity_selected: bool,
     exec_server_url: Option<&std::ffi::OsStr>,
 ) -> std::io::Result<AppServerTarget> {
-    if workload_identity_selected {
-        if explicit_remote_endpoint.is_some() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "workload identity must be configured on the remote app-server host",
-            ));
-        }
-        return Ok(AppServerTarget::Embedded);
+    if explicit_remote_endpoint.is_some() || workload_identity_selected || exec_server_url.is_some()
+    {
+        return Err(std::io::Error::other(
+            "Codex++ supports only the existing official local daemon; configure authentication and executors using codex.",
+        ));
     }
-    Ok(match explicit_remote_endpoint {
-        Some(RemoteAppServerEndpoint::UnixSocket { socket_path })
-            if default_daemon_socket.as_ref() == Some(&socket_path) =>
-        {
-            AppServerTarget::LocalDaemon {
-                endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
-                allow_embedded_fallback: false,
-            }
-        }
-        Some(endpoint) => AppServerTarget::Remote { endpoint },
-        // A shared daemon cannot adopt this invocation's executor selection.
-        None if can_reuse_implicit_local_daemon && exec_server_url.is_none() => {
-            default_daemon_socket.map_or(AppServerTarget::Embedded, |socket_path| {
-                AppServerTarget::LocalDaemon {
-                    allow_embedded_fallback: true,
-                    endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
-                }
-            })
-        }
-        None => AppServerTarget::Embedded,
+    if !can_reuse_implicit_local_daemon {
+        return Err(std::io::Error::other(
+            "These launch options require embedded execution, which Codex++ does not support.",
+        ));
+    }
+    let socket_path = default_daemon_socket.ok_or_else(crate::client_only::unavailable)?;
+    Ok(AppServerTarget::LocalDaemon {
+        endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+        allow_embedded_fallback: false,
     })
 }
 
@@ -1106,14 +1064,13 @@ async fn cloud_config_bundle_for_app_server_target(
     codex_home: &Path,
     embedded_network_policy: &codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> std::io::Result<CloudConfigBundleLoader> {
-    cloud_config_bundle_loader_for_storage(
-        embedded_network_policy
-            .bind_bootstrap_auth(app_server_target.auth_config_for_cloud_loader(
-                bootstrap_auth_config(codex_home, bootstrap_config)?,
-            )),
-        /*enable_codex_api_key_env*/ false,
-    )
-    .await
+    let _ = (
+        app_server_target,
+        bootstrap_config,
+        codex_home,
+        embedded_network_policy,
+    );
+    Ok(CloudConfigBundleLoader::default())
 }
 
 fn loader_overrides_are_default(loader_overrides: &LoaderOverrides) -> bool {
@@ -2149,16 +2106,7 @@ async fn run_ratatui_app(
             shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
             return Err(err);
         }
-        if let Err(err) = ConfigEditsBuilder::for_config(&config)
-            .with_edits([ConfigEdit::SetPath {
-                segments: vec!["notice".into(), "hide_gov_cloud_guidance".into()],
-                value: toml_edit::value(true),
-            }])
-            .apply()
-            .await
-        {
-            tracing::warn!(%err, "Failed to save GovCloud guidance acknowledgment");
-        }
+        // The official CLI owns persisted acknowledgments; this frontend only displays guidance.
     }
     let startup_hooks_review = maybe_run_startup_hooks_review(
         &mut app_server,

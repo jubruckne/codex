@@ -18,6 +18,8 @@
 //! hint. The pane schedules redraws so those hints can expire even when the UI is otherwise idle.
 //! Inline banners sit above the composer. Number shortcuts apply only to an empty, idle composer;
 //! drafts, paste bursts, and active dialogs keep their normal input routing.
+//! Reported turn token totals survive temporary status-row replacement; narrow rows omit them
+//! before elapsed time or the interrupt hint.
 //! Owned transcripts separate activity from the transcript and reserve their shared hint row
 //! below activity and previews, above the composer.
 pub(crate) use chat_composer::CommandPopupPlacement;
@@ -338,6 +340,7 @@ pub(crate) struct BottomPane {
     pending_thread_approvals: PendingThreadApprovals,
     context_window_percent: Option<i64>,
     context_window_used_tokens: Option<i64>,
+    turn_tokens: Option<(i64, i64)>,
     keymap: RuntimeKeymap,
 }
 
@@ -427,6 +430,7 @@ impl BottomPane {
             effects,
             context_window_percent: None,
             context_window_used_tokens: None,
+            turn_tokens: None,
             keymap,
         }
     }
@@ -1407,6 +1411,7 @@ impl BottomPane {
                     ));
                 }
                 if let Some(status) = self.status.as_mut() {
+                    status.update_turn_tokens(self.turn_tokens);
                     status.set_interrupt_hint_visible(/*visible*/ true);
                     status.set_interrupt_binding(
                         self.keymap
@@ -1444,12 +1449,23 @@ impl BottomPane {
                 )
             });
             if let Some(status) = self.status.as_mut() {
+                status.update_turn_tokens(self.turn_tokens);
                 status.set_interrupt_binding(
                     self.keymap
                         .primary_hint(KeymapContext::Chat, "interrupt_turn"),
                 );
             }
             self.sync_status_inline_message();
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn set_turn_tokens(&mut self, tokens: Option<(i64, i64)>) {
+        if self.turn_tokens != tokens {
+            self.turn_tokens = tokens;
+            if let Some(status) = self.status.as_mut() {
+                status.update_turn_tokens(tokens);
+            }
             self.request_redraw();
         }
     }
@@ -2571,6 +2587,27 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn composer_gap_footer(
+        &self,
+        width: u16,
+        warning_count: usize,
+    ) -> Option<TranscriptFooter> {
+        self.composer.composer_gap_footer(width, warning_count)
+    }
+
+    pub(crate) fn composer_gap_warning(
+        &self,
+        width: u16,
+        warning_count: usize,
+    ) -> Option<Line<'static>> {
+        self.composer.composer_gap_warning(width, warning_count)
+    }
+
+    pub(crate) fn set_composer_gap_warning_area(&self, area: Option<Rect>, warning_count: usize) {
+        self.composer
+            .set_composer_gap_warning_area(area, warning_count);
+    }
+
     pub(crate) fn show_footer_flash(&mut self, line: Line<'static>, duration: Duration) {
         if self.warnings_active()
             && let Some(view) = &mut self.warnings_view
@@ -2609,7 +2646,11 @@ impl BottomPane {
     ///
     /// This keeps the footer plumbing cheap during thread transitions where `App` may recompute
     /// the label several times while the visible thread settles.
-    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
+    pub(crate) fn agent_navigation_width(&self, width: u16) -> usize {
+        self.composer.agent_navigation_width(width)
+    }
+
+    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<Line<'static>>) {
         if self.composer.set_active_agent_label(active_agent_label) {
             self.request_redraw();
         }

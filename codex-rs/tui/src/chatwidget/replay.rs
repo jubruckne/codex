@@ -354,15 +354,15 @@ impl ChatWidget {
                 summary,
                 content,
             } => {
-                let recover_completion = self.status_state.reasoning_recovered_after_refresh
-                    && (!summary.is_empty()
-                        || (self.config.show_raw_agent_reasoning && !content.is_empty()));
+                let recover_completion = !summary.is_empty()
+                    || (self.config.show_raw_agent_reasoning && !content.is_empty());
                 if from_replay || recover_completion {
                     if from_replay {
                         self.on_reasoning_item_started(id);
-                    } else {
-                        // A refreshed snapshot can omit the active item and its earlier deltas.
-                        // Reconcile with the complete item before committing the transcript.
+                    }
+                    if recover_completion {
+                        // Authoritative text replaces deltas even when replay starts the same ID.
+                        // Without completed text, preserve the available streamed summary.
                         self.reasoning_buffer.clear();
                         self.reasoning_summary_parts.clear();
                     }

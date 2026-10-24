@@ -31,6 +31,7 @@ use crate::startup_draft::StartupDraftPump;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadStatus;
 use codex_protocol::protocol::SubAgentSource;
 
 pub(crate) const AGENTS_OVERVIEW_VIEW_ID: &str = "agents-overview";
@@ -49,6 +50,7 @@ pub(super) struct AgentsOverviewState {
     pub(super) usage_disabled: bool,
     pub(super) activity: HashMap<ThreadId, super::agents_overview_details::AgentsOverviewActivity>,
     pub(super) initialized: bool,
+    pub(super) expanded_root: Option<ThreadId>,
     pub(super) discovery: super::agents_overview_discovery::AgentsOverviewDiscovery,
     pub(super) show_more_requested: bool,
     pub(super) refresh_show_more: bool,
@@ -67,6 +69,8 @@ pub(super) struct AgentsOverviewState {
     pub(super) visible_thread_ids: Vec<ThreadId>,
     /// One-shot successor selected before a removal invalidates the displayed rows.
     pub(super) selection_after_removal: Option<ThreadId>,
+    /// Keep dashboard filters and tree scrolling independent across entry points.
+    pub(super) inactive_view_state: Arc<std::sync::Mutex<super::agents_overview_view::AgentsOverviewViewState>>,
     pub(super) view_state:
         Arc<std::sync::Mutex<super::agents_overview_view::AgentsOverviewViewState>>,
     /// Explicit permission-profile choices for new-session carryover, retained across navigation.
@@ -89,7 +93,90 @@ impl Drop for AgentsOverviewState {
 }
 
 impl App {
+    // Use protocol ancestry only; names and titles are never evidence of parentage.
+    pub(super) fn agents_overview_root_id(&self) -> Option<ThreadId> {
+        let mut id = self
+            .current_displayed_thread_id()
+            .or(self.primary_thread_id)?;
+        let mut seen = HashSet::new();
+        while seen.insert(id) {
+            let Some(thread) = self
+                .agents_overview
+                .threads
+                .get(&id)
+                .and_then(Option::as_ref)
+            else {
+                return self.primary_thread_id.or(Some(id));
+            };
+            let parent = thread
+                .parent_thread_id
+                .as_deref()
+                .and_then(|id| ThreadId::from_string(id).ok())
+                .or_else(|| match &thread.source {
+                    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                        parent_thread_id,
+                        ..
+                    }) => Some(*parent_thread_id),
+                    _ => None,
+                });
+            let Some(parent) = parent else {
+                return Some(id);
+            };
+            if !self.agents_overview.threads.contains_key(&parent) {
+                return Some(parent);
+            }
+            id = parent;
+        }
+        None
+    }
+
+    pub(super) fn refresh_unified_agents_tree(
+        &mut self,
+        app_server: &AppServerSession,
+        force: bool,
+    ) {
+        if self.agents_overview.view_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).current_tree
+            && let Some(root) = self.agents_overview_root_id()
+            && (force || self.agents_overview.expanded_root != Some(root))
+        {
+            self.agents_overview.expanded_root = Some(root);
+            if !self.agents_overview.threads.contains_key(&root) {
+                self.agents_overview.refresh_thread_ids.insert(root);
+            }
+            self.refresh_agent_picker_threads(app_server, root);
+        }
+    }
+
     pub(super) fn open_agents_overview(&mut self, app_server: &AppServerSession) {
+        self.open_agents_view(app_server, false);
+    }
+
+    pub(super) fn open_current_agents_overview(&mut self, app_server: &AppServerSession) {
+        self.open_agents_view(app_server, true);
+    }
+
+    fn set_agents_overview_mode(&mut self, current_tree: bool) {
+        let previous = self.agents_overview.view_state.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).current_tree;
+        if previous != current_tree {
+            std::mem::swap(
+                &mut self.agents_overview.view_state,
+                &mut self.agents_overview.inactive_view_state,
+            );
+        }
+        self.agents_overview.view_state.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).current_tree = current_tree;
+    }
+
+    pub(super) fn reopen_agents_overview(&mut self, app_server: &AppServerSession) {
+        let current_tree = self.agents_overview.view_state.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner).current_tree;
+        self.open_agents_view(app_server, current_tree);
+    }
+
+    fn open_agents_view(&mut self, app_server: &AppServerSession, current_tree: bool) {
+        self.set_agents_overview_mode(current_tree);
+
         if matches!(self.app_server_target, AppServerTarget::Embedded) {
             let workload_identity_selected = codex_login::is_workload_identity_selected();
             self.chat_widget.show_selection_view(SelectionViewParams {
@@ -138,6 +225,11 @@ impl App {
             return;
         }
 
+        self.agents_overview.expanded_root = if current_tree {
+            self.agents_overview_root_id()
+        } else {
+            None
+        };
         let threads = self
             .agents_overview
             .threads
@@ -237,6 +329,7 @@ impl App {
                             self.agents_overview.refill_count =
                                 self.agents_overview.refill_count.saturating_sub(1);
                         }
+                        self.record_agents_overview_turn_metadata(thread_id, &thread);
                         thread.turns.clear();
                         self.agents_overview.threads.insert(thread_id, Some(thread));
                     } else {
@@ -272,6 +365,9 @@ impl App {
                 && self.agents_overview.discovery.has_more())
         {
             self.refresh_changed_agents_overview_threads(app_server);
+        }
+        if !self.reconnect.offline {
+            self.refresh_unified_agents_tree(app_server, false);
         }
         self.repaint_agents_overview();
     }
@@ -344,6 +440,9 @@ impl App {
         mut threads: Vec<Thread>,
         selected_thread_id: Option<ThreadId>,
     ) -> AgentsOverviewView {
+        if self.agents_overview.view_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).current_tree {
+            return self.current_agents_overview_view(threads, selected_thread_id);
+        }
         threads.retain(|thread| !thread.ephemeral);
         for thread in &mut threads {
             if thread.parent_thread_id.is_none()
@@ -406,6 +505,148 @@ impl App {
         let mut view = AgentsOverviewView::new(
             rows,
             selected_thread_id,
+            self.config.features.enabled(Feature::Worktrees)
+                && !crate::uses_remote_workspace_or_environment(
+                    &self.app_server_target,
+                    self.environment_manager.as_ref(),
+                ),
+            self.local_settings.tui.status_line_use_colors,
+            self.app_event_tx.clone(),
+            self.keymap.clone(),
+            Arc::clone(&self.agents_overview.view_state),
+        );
+        view.pinned_thread_ranks = self.agents_overview.pinned_thread_ids.as_ref().map(|ids| {
+            ids.iter()
+                .copied()
+                .enumerate()
+                .map(|(rank, id)| (id, rank))
+                .collect()
+        });
+        view.pin_action_pending = self.agents_overview.pending_pin_change.is_some();
+        view
+    }
+
+    pub(super) fn current_agents_overview_view(
+        &self,
+        mut threads: Vec<Thread>,
+        selected_thread_id: Option<ThreadId>,
+    ) -> AgentsOverviewView {
+        threads.retain(|thread| !thread.ephemeral);
+        for thread in &mut threads {
+            if thread.parent_thread_id.is_none()
+                && let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id, ..
+                }) = &thread.source
+            {
+                thread.parent_thread_id = Some(parent_thread_id.to_string());
+            }
+        }
+        let mut children: HashMap<String, Vec<&Thread>> = HashMap::new();
+        for thread in &threads {
+            if let Some(parent_thread_id) = &thread.parent_thread_id {
+                children
+                    .entry(parent_thread_id.clone())
+                    .or_default()
+                    .push(thread);
+            }
+        }
+
+        let spawn_order: HashMap<_, _> = self
+            .agent_navigation
+            .tracked_thread_ids()
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| (id.to_string(), index))
+            .collect();
+        for children in children.values_mut() {
+            children.sort_by(|left, right| {
+                spawn_order
+                    .get(&left.id)
+                    .unwrap_or(&usize::MAX)
+                    .cmp(spawn_order.get(&right.id).unwrap_or(&usize::MAX))
+                    .then_with(|| {
+                        left.created_at
+                            .cmp(&right.created_at)
+                            .then_with(|| left.id.cmp(&right.id))
+                    })
+            });
+        }
+        let active_root = self.agents_overview.expanded_root.or_else(|| self.agents_overview_root_id());
+        let voice_owner = self.voice_owner_thread_id().map(|id| id.to_string());
+        let voice_session = threads
+            .iter()
+            .find(|thread| Some(&thread.id) == voice_owner.as_ref())
+            .map(|thread| &thread.session_id);
+        let mut roots = threads
+            .iter()
+            .filter(|thread| thread.parent_thread_id.is_none())
+            .filter(|thread| ThreadId::from_string(&thread.id).ok() == active_root)
+            .map(|root| (root, AgentsOverviewGroup::for_status(&root.status)))
+            .collect::<Vec<_>>();
+        roots.sort_by(|(left, _), (right, _)| {
+            let category = |thread: &Thread| (
+                ThreadId::from_string(&thread.id).ok() != active_root,
+                !matches!(thread.status, ThreadStatus::Active { .. }),
+            );
+            category(left).cmp(&category(right))
+                .then_with(|| self.agents_overview_updated_at(right).cmp(&self.agents_overview_updated_at(left)))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let mut rows = Vec::new();
+        for (root, group) in roots {
+            let Ok(thread_id) = ThreadId::from_string(&root.id) else {
+                continue;
+            };
+            if active_root != Some(thread_id) && self.agents_overview.hidden_threads.contains(&thread_id) {
+                continue;
+            }
+            rows.push(AgentsOverviewRow {
+                details: self.agents_overview_details(root, &children),
+                thread: root.clone(),
+                thread_id,
+                group,
+                is_current: self.current_displayed_thread_id() == Some(thread_id),
+                has_voice: voice_session == Some(&root.session_id),
+            });
+            if active_root == Some(thread_id) {
+                let mut pending = children.get(&root.id).cloned().unwrap_or_default();
+                pending.reverse();
+                let mut seen = HashSet::from([root.id.clone()]);
+                while let Some(child) = pending.pop() {
+                    if !seen.insert(child.id.clone()) {
+                        continue;
+                    }
+                    let Ok(thread_id) = ThreadId::from_string(&child.id) else {
+                        continue;
+                    };
+                    if self.agents_overview.hidden_threads.contains(&thread_id)
+                        || self.agents_overview.removed_threads.contains(&thread_id)
+                    {
+                        continue;
+                    }
+                    rows.push(AgentsOverviewRow {
+                        details: self.agents_overview_details(child, &children),
+                        thread: child.clone(),
+                        thread_id,
+                        group: AgentsOverviewGroup::for_status(&child.status),
+                        is_current: self.current_displayed_thread_id() == Some(thread_id),
+                        has_voice: voice_owner.as_ref() == Some(&child.id),
+                    });
+                    if let Some(descendants) = children.get(&child.id) {
+                        pending.extend(descendants.iter().rev().copied());
+                    }
+                }
+            }
+        }
+
+        self.agents_overview
+            .view_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .vim_enabled = self.chat_widget.composer_is_vim_enabled();
+        let mut view = AgentsOverviewView::new(
+            rows,
+            selected_thread_id,
             !crate::uses_remote_workspace_or_environment(
                 &self.app_server_target,
                 self.environment_manager.as_ref(),
@@ -415,6 +656,11 @@ impl App {
             self.keymap.clone(),
             Arc::clone(&self.agents_overview.view_state),
         );
+        view.started_at = *self.agents_overview.view_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .animation_started_at.get_or_insert_with(std::time::Instant::now);
+        view.expanded_root = active_root;
+        view.frame_requester = Some(self.chat_widget.frame_requester.clone());
+        view.animations_enabled = self.local_settings.tui.animations;
         view.pinned_thread_ranks = self.agents_overview.pinned_thread_ids.as_ref().map(|ids| {
             ids.iter()
                 .copied()
@@ -432,6 +678,23 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) -> Result<AppRunControl> {
+        if self.agents_overview.view_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).current_tree
+            && Some(thread_id) != self.agents_overview_root_id()
+            && self.agent_navigation.get(&thread_id).is_some()
+            && self.agents_overview_root_id() == self.primary_thread_id
+        {
+            if let Ok(mut state) = self.agents_overview.view_state.lock() {
+                state.completion = Some(crate::bottom_pane::ViewCompletion::Accepted);
+            }
+            self.chat_widget.pre_draw_tick();
+            if let Err(error) = self
+                .select_agent_thread_and_discard_side(tui, app_server, thread_id)
+                .await
+            {
+                self.add_agents_overview_error(format!("Failed to attach to task: {error}"));
+            }
+            return Ok(AppRunControl::Continue);
+        }
         Box::pin(self.attach_agents_overview_thread(
             tui, app_server, thread_id, /*started*/ None, /*startup_draft*/ None,
         ))

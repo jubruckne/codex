@@ -4,6 +4,7 @@
 //! catalog state into one-time TUI prompts or warning cells without owning the main event loop.
 
 use super::*;
+use crate::client_only::ProtectedConfigEdits as _;
 use codex_config::ConfigLayerSource;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
@@ -275,7 +276,7 @@ pub(super) async fn prepare_startup_tooltip_override(
     available_models: &[ModelPreset],
     is_first_run: bool,
 ) -> Option<String> {
-    if is_first_run || !config.tui.show_tooltips {
+    if crate::client_only::ENABLED || is_first_run || !config.tui.show_tooltips {
         return None;
     }
 
@@ -295,7 +296,7 @@ pub(super) async fn prepare_startup_tooltip_override(
 
     if let Err(err) = ConfigEditsBuilder::for_config_path(config.user_config_path.as_path())
         .set_model_availability_nux_count(&updated_shown_count)
-        .apply()
+        .reject_shared_config_write()
         .await
     {
         tracing::error!(
@@ -319,6 +320,9 @@ pub(super) async fn handle_model_migration_prompt_if_needed(
     app_event_tx: &AppEventSender,
     available_models: &[ModelPreset],
 ) -> std::io::Result<Option<AppExitInfo>> {
+    if crate::client_only::ENABLED {
+        return Ok(None);
+    }
     let upgrade = model_upgrade_for_migration(&config.model_provider_id, model, available_models);
 
     if let Some(ModelUpgrade {

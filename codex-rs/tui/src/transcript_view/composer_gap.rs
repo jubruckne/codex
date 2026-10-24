@@ -33,6 +33,62 @@ impl TranscriptView {
             || self.fitting_composer_hint(width, hint).is_some()
     }
 
+    pub(crate) fn context_copy_notice(&self, width: u16, now: Instant) -> Option<Line<'static>> {
+        self.copy_feedback
+            .as_ref()
+            .filter(|feedback| feedback.expires_at.is_none_or(|expiry| expiry > now))
+            .filter(|feedback| {
+                feedback.result.is_err() || matches!(feedback.result, Ok(CopyStatus::Pending(_)))
+            })
+            .map(|feedback| {
+                crate::line_truncation::truncate_line_with_ellipsis_if_overflow(
+                    feedback.line(width),
+                    usize::from(width),
+                )
+            })
+    }
+
+    /// Paint an already-resolved interaction packet, or the ordinary feedback/follow surface.
+    /// A hidden/replaced row always releases its old pointer targets.
+    pub(crate) fn render_context_gap(
+        &mut self,
+        area: Option<Rect>,
+        hint: Option<&HyperlinkLine>,
+        context: Option<&crate::bottom_pane::TranscriptFooter>,
+        buffer: &mut Buffer,
+        now: Instant,
+    ) -> (Option<Duration>, Option<(u16, u16)>) {
+        let context = context.filter(|context| {
+            context.cursor_column.is_some()
+                || context.text.lines.iter().any(|line| line.width() > 0)
+        });
+        if let (Some(area), Some(context)) = (area.filter(|area| !area.is_empty()), context) {
+            self.composer_tip = None;
+            self.render_follow_control(None, buffer);
+            if self
+                .copy_feedback
+                .as_ref()
+                .is_some_and(|feedback| feedback.expires_at.is_some_and(|expiry| expiry <= now))
+            {
+                self.copy_feedback = None;
+            }
+            let line = context.text.lines.first().cloned().unwrap_or_default();
+            let delay = self.copy_feedback.as_ref().and_then(|feedback| {
+                feedback
+                    .expires_at
+                    .map(|expiry| expiry.saturating_duration_since(now))
+            });
+            line.render(area, buffer);
+            let cursor = context
+                .cursor_column
+                .filter(|column| *column < area.width)
+                .map(|column| (area.x + column, area.y));
+            (delay, cursor)
+        } else {
+            (self.render_composer_gap(area, hint, buffer, now), None)
+        }
+    }
+
     fn fitting_composer_hint<'a>(
         &self,
         width: u16,

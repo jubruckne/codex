@@ -146,3 +146,95 @@ fn interactive_query_keeps_focus_over_underlying_hints_but_empty_override_wins()
         render(&composer, /*footer*/ None)
     );
 }
+
+#[test]
+fn shared_gap_reclaims_context_row_and_preserves_configured_status() {
+    let mut composer = composer();
+    let gap = crate::bottom_pane::ComposerGap::default();
+    let separate = ComposerRenderOptions {
+        separate_status_line: true,
+        ..Default::default()
+    };
+    let options = ComposerRenderOptions {
+        composer_gap: Some(&gap),
+        ..separate
+    };
+    assert_eq!(
+        composer.desired_height_with_options(60, separate),
+        composer.desired_height_with_options(60, options) + 1
+    );
+    for mode in [
+        FooterMode::ComposerEmpty,
+        FooterMode::ComposerHasDraft,
+        FooterMode::EscHint,
+        FooterMode::QuitShortcutReminder,
+    ] {
+        composer.footer.mode = mode;
+        let area = Rect::new(0, 0, 60, composer.desired_height_with_options(60, options));
+        let layout = composer.layout_with_options(area, options);
+        assert_eq!(layout.footer.height, 0);
+        assert_eq!(layout.status.height, 1);
+        let mut buffer = Buffer::empty(area);
+        composer.render_with_options(area, &mut buffer, None, options);
+        let rendered = text(&buffer);
+        assert!(rendered.contains("MODEL STATUS"));
+        for hint in [
+            "for shortcuts",
+            "to queue",
+            "again to quit",
+            "again to edit",
+        ] {
+            assert!(!rendered.contains(hint), "unexpected hint: {hint}");
+        }
+    }
+}
+
+#[test]
+fn shared_gap_keeps_reverse_search_cursor_visible_and_draft_restorable() {
+    use crossterm::event::{KeyEvent, KeyModifiers};
+    let mut composer = composer();
+    composer.draft.textarea.insert_str("original draft");
+    let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    for ch in "long search 界界界 tail".chars() {
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    for width in [1, 2, 8, 20, 60] {
+        let query = composer.composer_gap_footer(width, 3).unwrap();
+        assert!(query.is_interactive);
+        assert!(query.text.width() <= usize::from(width));
+        assert!(query.cursor_column.unwrap() < width);
+    }
+    let gap = crate::bottom_pane::ComposerGap::default();
+    let options = ComposerRenderOptions {
+        composer_gap: Some(&gap),
+        separate_status_line: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        composer.cursor_pos_with_options(Rect::new(0, 0, 60, 5), options),
+        None
+    );
+    let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(composer.draft.textarea.text(), "original draft");
+}
+
+#[test]
+fn shared_gap_preserves_feedback_and_only_painted_warnings_receive_clicks() {
+    let mut composer = composer();
+    let area = Rect::new(4, 2, 30, 1);
+    let warning = composer.composer_gap_warning(30, 2).unwrap();
+    assert!(warning.to_string().contains("warning"));
+    composer.set_composer_gap_warning_area(Some(area), 2);
+    assert!(composer.warning_notice_contains(ratatui::layout::Position::new(4, 2)));
+    composer.show_footer_flash(
+        Line::from("Copy failed · try again"),
+        Duration::from_secs(5),
+    );
+    let feedback = composer.composer_gap_footer(30, 2).unwrap();
+    assert!(feedback.text.to_string().contains("Copy failed"));
+    // A separately painted warning remains clickable even while feedback is active.
+    composer.set_composer_gap_warning_area(Some(area), 2);
+    assert!(composer.warning_notice_contains(ratatui::layout::Position::new(4, 2)));
+    composer.set_composer_gap_warning_area(None, 2);
+    assert!(!composer.warning_notice_contains(ratatui::layout::Position::new(4, 2)));
+}

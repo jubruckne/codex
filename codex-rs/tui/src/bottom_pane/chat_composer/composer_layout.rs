@@ -150,6 +150,12 @@ impl ChatComposer {
                 .filter(|column| *column < area.width && area.height > 0)
                 .map(|column| (area.x + column, area.y));
         }
+        if options.composer_gap.is_some()
+            && (self.history_search.is_some() || self.draft.textarea.vim_query().is_some())
+        {
+            // The app places the query cursor in the shared composer gap.
+            return None;
+        }
         if !self.draft.input_enabled || self.attachments.selected_remote_image_index.is_some() {
             return None;
         }

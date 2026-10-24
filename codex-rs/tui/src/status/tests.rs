@@ -382,17 +382,29 @@ async fn status_snapshot_shows_chatgpt_plan_without_email() {
     write_models_cache(temp_home.path())
         .await
         .expect("write models cache");
-    let mut app_server = crate::start_app_server_for_picker(
-        crate::backend_id::BackendId::new(),
-        &config,
-        &crate::AppServerTarget::Embedded,
+    // This upstream account fixture needs a temporary in-process server, not
+    // the installed frontend's attachment-only launch path.
+    let client = crate::start_embedded_app_server(
+        codex_arg0::Arg0DispatchPaths::default(),
+        config.clone(),
         Vec::new(),
         loader_overrides,
+        /*strict_config*/ false,
+        crate::CloudConfigBundleLoader::default(),
+        codex_feedback::CodexFeedback::new(),
+        /*log_db*/ None,
         /*state_db*/ None,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Default::default(),
     )
     .await
-    .expect("start embedded app server");
+    .expect("start test embedded app server");
+    let mut app_server = crate::app_server_session::AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        codex_app_server_client::AppServerClient::InProcess(client),
+        crate::app_server_session::ThreadParamsMode::Embedded,
+    )
+    .with_local_codex_home(&config.codex_home);
     let bootstrap = app_server
         .bootstrap(&config)
         .await

@@ -969,6 +969,7 @@ See the Codex keymap documentation for supported actions and examples."
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             agents_overview,
+            agent_feed: Default::default(),
             side_threads: HashMap::new(),
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
@@ -1017,6 +1018,9 @@ See the Codex keymap documentation for supported actions and examples."
         {
             // Prewarm WSL interop off the UI thread, without accessing clipboard contents.
             let _ = tui.clipboard.warm_text_reader(tui.frame_requester());
+        }
+        if app.local_settings.tui.fullscreen_transcript && tui.is_owned_screen() {
+            app.start_agent_feed_summarizer();
         }
         app.remember_launch_permissions();
         if !tui.is_terminal_focused() {

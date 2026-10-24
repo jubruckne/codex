@@ -36,7 +36,7 @@ impl ChatComposer {
             && key_hint::plain(KeyCode::Left).is_press(key)
             && self.agents_navigation_available()
         {
-            self.app_event_tx.send(AppEvent::OpenAgentsOverview);
+            self.app_event_tx.send(AppEvent::OpenCurrentAgentsOverview);
             return true;
         }
         false

@@ -95,7 +95,11 @@ impl ChatWidget {
     ///
     /// `ChatWidget` stays a pass-through here so `App` remains the owner of "which thread is the
     /// user actually looking at?" and the footer stack remains a pure renderer of that decision.
-    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
+    pub(crate) fn agent_navigation_width(&self, width: u16) -> usize {
+        self.bottom_pane.agent_navigation_width(width)
+    }
+
+    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<Line<'static>>) {
         self.bottom_pane.set_active_agent_label(active_agent_label);
     }
 

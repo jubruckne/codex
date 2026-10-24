@@ -17,6 +17,8 @@ use chrono::NaiveDate;
 /// restoring the conversation constructs new cells and refreshes whether the timestamp needs a date.
 #[derive(Debug)]
 pub struct FinalMessageSeparator {
+    token_usage: Option<(i64, i64)>,
+    context_growth: Option<i64>,
     elapsed_seconds: Option<u64>,
     runtime_metrics: Option<RuntimeMetricsSummary>,
     completed_at: Option<DateTime<Local>>,
@@ -30,6 +32,8 @@ impl FinalMessageSeparator {
         runtime_metrics: Option<RuntimeMetricsSummary>,
     ) -> Self {
         Self {
+            token_usage: None,
+            context_growth: None,
             elapsed_seconds,
             runtime_metrics,
             completed_at: None,
@@ -56,7 +60,21 @@ impl FinalMessageSeparator {
         self
     }
 
+    pub(crate) fn with_token_usage(mut self, usage: Option<(i64, i64)>) -> Self {
+        self.token_usage = usage;
+        self
+    }
+
+    pub(crate) fn with_context_growth(mut self, growth: Option<i64>) -> Self {
+        self.context_growth = growth;
+        self
+    }
+
     fn label(&self, today: NaiveDate) -> Option<String> {
+        self.label_with_usage(today, true)
+    }
+
+    fn label_with_usage(&self, today: NaiveDate, include_usage: bool) -> Option<String> {
         let mut label_parts = Vec::new();
         if let Some(elapsed_seconds) = self.elapsed_seconds {
             let hours = elapsed_seconds / 3_600;
@@ -72,6 +90,20 @@ impl FinalMessageSeparator {
                 format!("{seconds}s")
             };
             label_parts.push(format!("Worked for {elapsed}"));
+        }
+        if include_usage && let Some((input, output)) = self.token_usage {
+            label_parts.push(format!(
+                "↑ {} ↓ {}",
+                crate::token_usage::compact_turn_tokens(input),
+                crate::token_usage::compact_turn_tokens(output)
+            ));
+        }
+        if include_usage && let Some(growth) = self.context_growth {
+            let sign = if growth < 0 { "−" } else { "+" };
+            label_parts.push(format!(
+                "context {sign}{}",
+                crate::token_usage::compact_turn_tokens(growth.saturating_abs())
+            ));
         }
         if let Some(completed_at) = self.completed_at {
             let date_format = if completed_at.date_naive() == today {
@@ -90,7 +122,7 @@ impl FinalMessageSeparator {
         if let Some(metrics_label) = self.runtime_metrics.and_then(runtime_metrics_label) {
             label_parts.push(metrics_label);
         }
-        (!label_parts.is_empty()).then(|| label_parts.join(" • "))
+        (!label_parts.is_empty()).then(|| label_parts.join(" · "))
     }
 }
 impl HistoryCell for FinalMessageSeparator {
@@ -99,7 +131,14 @@ impl HistoryCell for FinalMessageSeparator {
             return Vec::new();
         }
         self.label(self.display_date)
-            .map(|label| {
+            .map(|mut label| {
+                if (self.token_usage.is_some() || self.context_growth.is_some())
+                    && crate::width::display_width(&label) + 2 > usize::from(width)
+                {
+                    label = self
+                        .label_with_usage(self.display_date, false)
+                        .unwrap_or_default();
+                }
                 let indent = if width > 2 { "  " } else { "" };
                 let options = textwrap::Options::new(usize::from(width))
                     .initial_indent(indent)
@@ -205,7 +244,7 @@ pub(crate) fn runtime_metrics_label(summary: RuntimeMetricsSummary) -> Option<St
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join(" • "))
+        Some(parts.join(" · "))
     }
 }
 

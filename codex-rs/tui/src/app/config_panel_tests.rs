@@ -33,6 +33,26 @@ fn next_config_preference(rx: &mut UnboundedReceiver<AppEvent>) -> Result<Config
 }
 
 #[tokio::test]
+async fn client_only_config_panel_preserves_saved_and_live_preferences() -> Result<()> {
+    let mut app = Box::pin(make_test_app()).await;
+    let path = app.local_settings.user_config_path.clone();
+    let original = std::fs::read(&path).ok();
+    let animations = app.local_settings.tui.animations;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.save_config_preference(
+        &mut tui,
+        ConfigPreference::Toggle {
+            setting: ConfigToggle::Animations,
+            enabled: !animations,
+        },
+    )
+    .await;
+    assert_eq!(std::fs::read(&path).ok(), original);
+    assert_eq!(app.local_settings.tui.animations, animations);
+    Ok(())
+}
+
+#[tokio::test]
 async fn config_toggle_save_uses_host_config_and_applies_live_while_offline() -> Result<()> {
     let root = tempfile::tempdir()?;
     let home = root.path().join("home");

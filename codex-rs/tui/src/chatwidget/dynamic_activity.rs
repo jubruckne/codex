@@ -34,7 +34,12 @@ impl ChatWidget {
             if !cell.is_active() {
                 self.transcript.dynamic_calls.remove(&id);
             }
-        } else if let Some(cell) = history_cell::DynamicToolCallCell::from_item(item) {
+        } else if let Some(mut cell) = history_cell::DynamicToolCallCell::from_item(item) {
+            cell.configure_native(
+                !self.local_settings.transcript_mode.is_owned(),
+                Some(self.frame_requester.clone()),
+                self.local_settings.tui.animations && self.local_settings.tui.effects.progress,
+            );
             self.flush_answer_stream_with_separator();
             if cell.is_active() {
                 self.transcript

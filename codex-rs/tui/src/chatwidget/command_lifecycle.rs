@@ -251,6 +251,8 @@ impl ChatWidget {
         else {
             return;
         };
+        let original_command = command.clone();
+        let original_id = id.clone();
         let (command, parsed_cmd) =
             command_execution_command_and_parsed(&command, &command_actions);
         // Ensure the status indicator is visible while the command runs.
@@ -308,6 +310,19 @@ impl ChatWidget {
             self.bump_active_cell_revision();
         }
 
+        if let Some(cell) = self
+            .transcript
+            .active_cell
+            .as_mut()
+            .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
+        {
+            cell.configure_native(
+                !self.local_settings.transcript_mode.is_owned(),
+                Some(self.frame_requester.clone()),
+                false,
+            );
+            cell.remember_original_command(&original_id, &original_command);
+        }
         self.request_redraw();
     }
 
@@ -345,6 +360,8 @@ impl ChatWidget {
         else {
             return;
         };
+        let reported_exit_code = exit_code;
+        let original_command = command.clone();
         let event_command = split_command_string(&command);
         let event_parsed = command_actions
             .into_iter()
@@ -424,6 +441,8 @@ impl ChatWidget {
                     .as_mut()
                     .and_then(|c| c.as_any_mut().downcast_mut::<ExecCell>())
                 {
+                    cell.remember_original_command(&id, &original_command);
+                    cell.remember_exit_code(&id, reported_exit_code);
                     let completed = cell.complete_call(&id, output, duration);
                     debug_assert!(completed, "active exec cell should contain {id}");
                     if cell.should_flush() {
@@ -443,6 +462,13 @@ impl ChatWidget {
                     /*interaction_input*/ None,
                     self.local_settings.tui.animations && self.local_settings.tui.effects.progress,
                 );
+                orphan.configure_native(
+                    !self.local_settings.transcript_mode.is_owned(),
+                    None,
+                    true,
+                );
+                orphan.remember_original_command(&id, &original_command);
+                orphan.remember_exit_code(&id, reported_exit_code);
                 let completed = orphan.complete_call(&id, output, duration);
                 debug_assert!(completed, "new orphan exec cell should contain {id}");
                 self.app_event_tx
@@ -458,6 +484,13 @@ impl ChatWidget {
                     /*interaction_input*/ None,
                     self.local_settings.tui.animations && self.local_settings.tui.effects.progress,
                 );
+                cell.configure_native(
+                    !self.local_settings.transcript_mode.is_owned(),
+                    Some(self.frame_requester.clone()),
+                    false,
+                );
+                cell.remember_original_command(&id, &original_command);
+                cell.remember_exit_code(&id, reported_exit_code);
                 let completed = cell.complete_call(&id, output, duration);
                 debug_assert!(completed, "new exec cell should contain {id}");
                 if let Some(active) = self
@@ -470,6 +503,8 @@ impl ChatWidget {
                     && cell.is_exploring_cell()
                 {
                     // Replayed commands have completion events without matching starts.
+                    active.original_commands.extend(cell.original_commands);
+                    active.reported_exit_codes.extend(cell.reported_exit_codes);
                     active.group.calls.extend(cell.group.calls);
                     self.bump_active_cell_revision();
                     self.request_redraw();

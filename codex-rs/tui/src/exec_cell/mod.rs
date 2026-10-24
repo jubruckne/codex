@@ -1,7 +1,10 @@
 mod compact;
 mod live_output;
 mod model;
+mod native;
+mod preview;
 mod render;
+mod routine;
 mod transcript;
 
 pub(crate) use model::CommandOutput;

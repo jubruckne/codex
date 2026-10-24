@@ -102,22 +102,24 @@ impl AgentsOverviewView {
             title: "View",
             entries: Vec::new(),
         };
-        let filter = self.center_filter_hint();
-        if !filter.is_empty() {
-            view.entries.push(Shortcut {
-                key: filter,
-                action: "Filter",
-            });
-        }
-        for (action, bindings, label) in [
-            ("search", &self.agents_keymap.search, "Search"),
-            (
-                "toggle_grouping",
-                &self.agents_keymap.toggle_grouping,
-                "Group",
-            ),
-        ] {
-            view.push(self.agents_keymap.primary_hint(action, bindings), label);
+        if !self.current_tree {
+            let filter = self.center_filter_hint();
+            if !filter.is_empty() {
+                view.entries.push(Shortcut {
+                    key: filter,
+                    action: "Filter",
+                });
+            }
+            for (action, bindings, label) in [
+                ("search", &self.agents_keymap.search, "Search"),
+                (
+                    "toggle_grouping",
+                    &self.agents_keymap.toggle_grouping,
+                    "Group",
+                ),
+            ] {
+                view.push(self.agents_keymap.primary_hint(action, bindings), label);
+            }
         }
         let mut lines = vec!["Task shortcuts".bold().into(), Line::default()];
         lines.extend(crate::shortcut_help::group_lines(

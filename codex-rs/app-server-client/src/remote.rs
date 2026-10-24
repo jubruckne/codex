@@ -159,6 +159,7 @@ struct RemoteServerMetadata {
 }
 
 pub struct RemoteAppServerClient {
+    request_filter: Option<fn(&JSONRPCRequest) -> IoResult<()>>,
     command_tx: mpsc::Sender<RemoteClientCommand>,
     event_rx: mpsc::UnboundedReceiver<AppServerEvent>,
     pending_events: VecDeque<AppServerEvent>,
@@ -168,6 +169,7 @@ pub struct RemoteAppServerClient {
 
 #[derive(Clone)]
 pub struct RemoteAppServerRequestHandle {
+    request_filter: Option<fn(&JSONRPCRequest) -> IoResult<()>>,
     command_tx: mpsc::Sender<RemoteClientCommand>,
 }
 
@@ -519,6 +521,7 @@ impl RemoteAppServerClient {
         });
 
         Ok(Self {
+            request_filter: None,
             command_tx,
             event_rx,
             pending_events: pending_events.into(),
@@ -527,8 +530,15 @@ impl RemoteAppServerClient {
         })
     }
 
+    /// Apply a frontend policy before any request is queued on this connection.
+    pub fn with_request_filter(mut self, filter: fn(&JSONRPCRequest) -> IoResult<()>) -> Self {
+        self.request_filter = Some(filter);
+        self
+    }
+
     pub fn request_handle(&self) -> RemoteAppServerRequestHandle {
         RemoteAppServerRequestHandle {
+            request_filter: self.request_filter,
             command_tx: self.command_tx.clone(),
         }
     }
@@ -597,6 +607,7 @@ impl RemoteAppServerClient {
 
     pub async fn shutdown(self) -> IoResult<()> {
         let Self {
+            request_filter: _,
             command_tx,
             event_rx,
             pending_events: _pending_events,
@@ -685,6 +696,9 @@ impl RemoteAppServerRequestHandle {
     }
 
     pub async fn request_json_rpc(&self, request: JSONRPCRequest) -> IoResult<RequestResult> {
+        if let Some(filter) = self.request_filter {
+            filter(&request)?;
+        }
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .send(RemoteClientCommand::Request {

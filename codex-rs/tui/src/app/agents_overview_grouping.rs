@@ -5,6 +5,7 @@ use super::super::App;
 use super::super::agents_overview::AgentsOverviewState;
 use super::AgentsOverviewGrouping;
 use super::AgentsOverviewView;
+use crate::client_only::ProtectedConfigEdits as _;
 use crate::legacy_core::config::edit::ConfigEdit;
 use crate::legacy_core::config::edit::ConfigEditsBuilder;
 use codex_app_server_protocol::Thread;
@@ -18,13 +19,20 @@ pub(super) fn model_name(thread: &Thread) -> &str {
 }
 
 impl AgentsOverviewView {
+    pub(super) fn current_tree(&self, index: usize) -> bool {
+        self.expanded_root == Some(self.rows[self.root_index(index)].thread_id)
+    }
+
     pub(super) fn is_pinned(&self, index: usize) -> bool {
         self.pinned_thread_ranks
             .as_ref()
             .is_some_and(|ranks| ranks.contains_key(&self.rows[index].thread_id))
     }
 
-    pub(super) fn visible_indices(&self) -> Vec<usize> {
+    pub(in crate::app) fn visible_indices(&self) -> Vec<usize> {
+        if self.current_tree {
+            return (0..self.rows.len()).collect();
+        }
         let state = self.state();
         let search = state.search.to_lowercase();
         let (_, status_group) = super::command_center::TASK_FILTERS[state.status_filter];
@@ -114,7 +122,7 @@ impl App {
         if let Err(err) =
             ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                 .with_edits([edit])
-                .apply()
+                .reject_shared_config_write()
                 .await
         {
             self.add_agents_overview_error(format!(

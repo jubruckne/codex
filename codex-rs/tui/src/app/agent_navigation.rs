@@ -24,8 +24,17 @@ use crate::multi_agents::SubAgentActivityDisplay;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut;
 use crate::multi_agents::previous_agent_shortcut;
+use codex_app_server_protocol::ThreadActiveFlag;
+use codex_app_server_protocol::ThreadStatus;
 use codex_protocol::ThreadId;
+use crossterm::event::KeyCode;
+use crossterm::event::KeyEvent;
+use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
+use ratatui::style::Style;
+use ratatui::text::Line;
 use ratatui::text::Span;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -50,8 +59,47 @@ pub(crate) struct AgentNavigationState {
     /// Spawned child threads whose instructions are owned by their parent agent.
     parent_owned_threads: HashSet<ThreadId>,
     picker_excluded_threads: HashSet<ThreadId>,
+    /// Stable numeric destinations; slot zero belongs to the primary thread.
+    quick_switch_root: Option<ThreadId>,
+    quick_switch_slots: [Option<ThreadId>; 9],
+    quick_switch_width: usize,
+    /// Server timestamps and received activity, in Unix milliseconds. Metadata reads never
+    /// invent activity, and stale replies cannot move a thread's update time backwards.
+    last_updates: HashMap<ThreadId, i64>,
     /// Coalesces root refreshes while rejecting replies from a previous session.
     pub(super) picker_refresh: Option<AgentPickerRefreshState>,
+}
+
+/// Selection stays visually dominant; other destinations reflect their known state.
+fn agent_footer_style(
+    selected: bool,
+    closed: bool,
+    running: bool,
+    status: Option<&ThreadStatus>,
+) -> Style {
+    if selected {
+        return Style::default().fg(crate::style::accent_color()).bold().not_dim();
+    }
+    if closed {
+        return crate::style::secondary_text_style().dim();
+    }
+    if running {
+        if let Some(ThreadStatus::Active { active_flags }) = status
+            && (active_flags.contains(&ThreadActiveFlag::WaitingOnApproval)
+                || active_flags.contains(&ThreadActiveFlag::WaitingOnUserInput))
+        {
+            return crate::style::agent_waiting_style();
+        }
+        // A newer live event can supersede idle/unloaded/error metadata from a read.
+        return crate::style::agent_working_style();
+    }
+    match status {
+        Some(ThreadStatus::SystemError) => {
+            crate::style::status_style(crate::style::StatusTone::Failure).not_bold().not_dim()
+        }
+        Some(ThreadStatus::NotLoaded) => crate::style::secondary_text_style().dim(),
+        _ => crate::style::secondary_text_style(),
+    }
 }
 
 /// Direction of keyboard traversal through the stable picker order.
@@ -107,7 +155,7 @@ impl AgentNavigationState {
         true
     }
 
-    pub(crate) fn finish_picker_refresh(
+    pub(super) fn finish_picker_refresh(
         &mut self,
         thread_id: ThreadId,
         request_id: Uuid,
@@ -197,6 +245,12 @@ impl AgentNavigationState {
                     is_running: false,
                     is_closed: false,
                 });
+        let timestamp_ms = chrono::Utc::now().timestamp_millis();
+        let updated = self
+            .last_updates
+            .entry(activity.thread_id)
+            .or_insert(timestamp_ms);
+        *updated = (*updated).max(timestamp_ms);
         entry.agent_path = Some(activity.agent_path);
         if activity.is_running_hint
             && !entry.is_closed
@@ -269,6 +323,9 @@ impl AgentNavigationState {
         self.parent_owned_threads.clear();
         self.picker_excluded_threads.clear();
         self.picker_refresh = None;
+        self.quick_switch_root = None;
+        self.quick_switch_slots = [None; 9];
+        self.last_updates.clear();
     }
 
     /// Removes a tracked thread entirely from picker metadata and traversal order.
@@ -282,6 +339,12 @@ impl AgentNavigationState {
         self.stopped_threads.remove(&thread_id);
         self.parent_owned_threads.remove(&thread_id);
         self.picker_excluded_threads.remove(&thread_id);
+        self.last_updates.remove(&thread_id);
+        for slot in &mut self.quick_switch_slots {
+            if *slot == Some(thread_id) {
+                *slot = None;
+            }
+        }
     }
 
     /// Returns whether there is at least one tracked thread other than the primary one.
@@ -315,7 +378,7 @@ impl AgentNavigationState {
             .collect()
     }
 
-    pub(crate) fn set_picker_thread_visibility(
+    pub(super) fn set_picker_thread_visibility(
         &mut self,
         thread_id: ThreadId,
         visibility: AgentPickerThreadVisibility,
@@ -389,6 +452,358 @@ impl AgentNavigationState {
                 && !self.picker_excluded_threads.contains(&thread_id))
             .then_some(thread_id)
         })
+    }
+
+    pub(crate) fn note_updated_at(&mut self, thread_id: ThreadId, timestamp_ms: i64) {
+        let updated = self.last_updates.entry(thread_id).or_insert(timestamp_ms);
+        *updated = (*updated).max(timestamp_ms);
+    }
+
+    fn quick_switch_is_active(&self, thread_id: ThreadId) -> bool {
+        self.threads
+            .get(&thread_id)
+            .is_some_and(|entry| entry.is_running && !entry.is_closed)
+    }
+
+    pub(crate) fn set_quick_switch_width(&mut self, width: usize) {
+        self.quick_switch_width = width;
+    }
+
+    fn quick_switch_label(&self, thread_id: ThreadId, root: ThreadId) -> String {
+        if thread_id == root {
+            return "root".to_string();
+        }
+        let Some(entry) = self.threads.get(&thread_id) else {
+            return "agent".to_string();
+        };
+        match entry
+            .agent_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            Some(path) => path
+                .strip_prefix("/root/")
+                .map_or_else(|| path.to_string(), |relative| format!("/{relative}")),
+            None => format_agent_picker_item_name(
+                entry.agent_nickname.as_deref(),
+                entry.agent_role.as_deref(),
+                /*is_primary*/ false,
+            ),
+        }
+    }
+
+    /// Only shorten at word/path boundaries, never in the middle of a Unicode character.
+    /// Prefixes are preferred when unique; retaining a suffix distinguishes shared prefixes.
+    fn quick_switch_label_variants(label: &str) -> Vec<String> {
+        if label.trim_start_matches('/').chars().count() <= 10 {
+            return Vec::new();
+        }
+        let boundaries: Vec<_> = label
+            .char_indices()
+            .filter(|(index, ch)| {
+                *index > 0 && (matches!(*ch, '_' | '-' | '/' | '.') || ch.is_whitespace())
+            })
+            .collect();
+        let width = crate::width::display_width(label);
+        let mut variants = Vec::new();
+        for (start, separator) in &boundaries {
+            let start = *start + separator.len_utf8();
+            if start < label.len() {
+                let path_prefix = if label.starts_with('/') { "/" } else { "" };
+                variants.push(format!("{path_prefix}…{}", &label[start..]));
+            }
+        }
+        for (end, _) in &boundaries {
+            let prefix = &label[..*end];
+            variants.push(format!("{prefix}…"));
+            for (start, separator) in &boundaries {
+                let start = *start + separator.len_utf8();
+                if start > *end && start < label.len() {
+                    variants.push(format!("{prefix}…{}", &label[start..]));
+                }
+            }
+        }
+        variants.retain(|variant| crate::width::display_width(variant) < width);
+        variants.sort();
+        variants.dedup();
+        variants
+    }
+
+    fn quick_switch_labels(
+        &self,
+        slots: &[Option<ThreadId>; 9],
+        root: ThreadId,
+        shorten: bool,
+    ) -> [Option<String>; 9] {
+        let mut labels = slots.map(|slot| slot.map(|id| self.quick_switch_label(id, root)));
+        if !shorten || Self::quick_switch_labels_width(&labels) <= self.quick_switch_width {
+            return labels;
+        }
+        let full_widths = labels.each_ref().map(|label| {
+            label.as_deref().map_or(0, crate::width::display_width)
+        });
+        let variants = labels.each_ref().map(|label| {
+            label
+                .as_deref()
+                .map(Self::quick_switch_label_variants)
+                .unwrap_or_default()
+        });
+        // Reject ambiguous abbreviations against both full labels and all other variants.
+        // This makes shared prefixes retain distinguishing suffixes deterministically.
+        let unique: [Vec<String>; 9] = std::array::from_fn(|index| {
+            variants[index]
+                .iter()
+                .filter(|variant| {
+                    *variant != "root"
+                        && (0..labels.len()).all(|other| {
+                            other == index
+                                || (labels[other].as_ref() != Some(*variant)
+                                    && !variants[other].contains(*variant))
+                        })
+                })
+                .cloned()
+                .collect()
+        });
+        loop {
+            let width = Self::quick_switch_labels_width(&labels);
+            if width <= self.quick_switch_width {
+                break;
+            }
+            let mut best = None;
+            for (index, options) in unique.iter().enumerate() {
+                let Some(label) = &labels[index] else {
+                    continue;
+                };
+                let current_width = crate::width::display_width(label);
+                for variant in options {
+                    let variant_width = crate::width::display_width(variant);
+                    if variant_width >= current_width {
+                        continue;
+                    }
+                    let saved = current_width - variant_width;
+                    // Spread shortening across names in small boundary steps, stopping as
+                    // soon as the row fits. Ties follow slot order and prefer unique prefixes.
+                    let score = (full_widths[index] - variant_width, saved, index);
+                    if best.as_ref().is_none_or(|(old_score, _, _)| score < *old_score) {
+                        best = Some((score, index, variant.clone()));
+                    }
+                }
+            }
+            let Some((_, index, variant)) = best else {
+                break;
+            };
+            labels[index] = Some(variant);
+        }
+        labels
+    }
+
+    fn quick_switch_labels_width(labels: &[Option<String>; 9]) -> usize {
+        // `[0 root]`, then one space plus `[N path]` for each occupied single-digit slot.
+        8 + labels
+            .iter()
+            .flatten()
+            .map(|label| crate::width::display_width(label) + 5)
+            .sum::<usize>()
+    }
+
+    fn quick_switch_slots_width(
+        &self,
+        slots: &[Option<ThreadId>; 9],
+        root: ThreadId,
+        shorten: bool,
+    ) -> usize {
+        Self::quick_switch_labels_width(&self.quick_switch_labels(slots, root, shorten))
+    }
+
+    fn refresh_quick_switch_slots(&mut self, root: ThreadId) {
+        if self.quick_switch_root != Some(root) {
+            self.quick_switch_root = Some(root);
+            self.quick_switch_slots = [None; 9];
+        }
+        let previous_slots = self.quick_switch_slots;
+        for index in 0..self.quick_switch_slots.len() {
+            if self.quick_switch_slots[index].is_some_and(|thread_id| {
+                thread_id == root
+                    || !self.threads.contains_key(&thread_id)
+                    || self.picker_excluded_threads.contains(&thread_id)
+            }) {
+                self.quick_switch_slots[index] = None;
+            }
+        }
+        // First shorten to protect active destinations, then retire inactive slots first.
+        // Surviving agents retain their numbers, including when this leaves a gap.
+        while self.quick_switch_slots_width(
+            &self.quick_switch_slots,
+            root,
+            self.quick_switch_slots
+                .iter()
+                .flatten()
+                .any(|id| self.quick_switch_is_active(*id)),
+        ) > self.quick_switch_width
+        {
+            let remove = self.quick_switch_eviction_candidates().first().copied();
+            let Some(index) = remove else {
+                break;
+            };
+            self.quick_switch_slots[index] = None;
+        }
+        let mut candidates: Vec<_> = self
+            .visible_threads()
+            .into_iter()
+            .map(|(thread_id, _)| thread_id)
+            .filter(|thread_id| *thread_id != root)
+            .collect();
+        // Stable sorting preserves first-seen order when timestamps are equal or unavailable.
+        candidates.sort_by_key(|thread_id| {
+            (
+                Reverse(self.quick_switch_is_active(*thread_id)),
+                Reverse(self.last_updates.get(thread_id).copied().unwrap_or(0)),
+            )
+        });
+        for candidate in candidates {
+            if self.quick_switch_slots.contains(&Some(candidate)) {
+                continue;
+            }
+            let previous_index = previous_slots
+                .iter()
+                .position(|slot| *slot == Some(candidate));
+            // A resize can remove a long label and then admit a shorter one in the same frame.
+            // If that shorter agent was already shown, restore its original number.
+            let vacant_index = if let Some(index) = previous_index {
+                if self.quick_switch_slots[index].is_some() {
+                    continue;
+                }
+                Some(index)
+            } else {
+                self.quick_switch_slots.iter().position(Option::is_none)
+            };
+            if let Some(index) = vacant_index {
+                let mut trial = self.quick_switch_slots;
+                trial[index] = Some(candidate);
+                if self.quick_switch_slots_width(&trial, root, self.quick_switch_is_active(candidate))
+                    <= self.quick_switch_width
+                {
+                    self.quick_switch_slots = trial;
+                    continue;
+                }
+            }
+            if !self.quick_switch_is_active(candidate) {
+                continue;
+            }
+            let candidate_updated = self.last_updates.get(&candidate).copied().unwrap_or(0);
+            let mut trial = self.quick_switch_slots;
+            let mut replacement = previous_index;
+            // Active arrivals displace inactive agents immediately. Among active agents, each
+            // evicted destination must be more than ten seconds older than the new candidate.
+            for index in self.quick_switch_eviction_candidates() {
+                let thread_id = trial[index].expect("occupied eviction candidate");
+                let updated = self.last_updates.get(&thread_id).copied().unwrap_or(0);
+                if self.quick_switch_is_active(thread_id)
+                    && candidate_updated.saturating_sub(updated) <= 10_000
+                {
+                    break;
+                }
+                trial[index] = None;
+                let target = *replacement.get_or_insert(index);
+                let mut fitted = trial;
+                fitted[target] = Some(candidate);
+                if self.quick_switch_slots_width(&fitted, root, true) <= self.quick_switch_width {
+                    self.quick_switch_slots = fitted;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn quick_switch_eviction_candidates(&self) -> Vec<usize> {
+        let mut candidates: Vec<_> = (0..self.quick_switch_slots.len())
+            .filter(|index| self.quick_switch_slots[*index].is_some())
+            .collect();
+        candidates.sort_by_key(|index| {
+            let thread_id = self.quick_switch_slots[*index].expect("occupied slot");
+            (
+                self.quick_switch_is_active(thread_id),
+                self.last_updates.get(&thread_id).copied().unwrap_or(0),
+                Reverse(*index),
+            )
+        });
+        candidates
+    }
+
+    /// Numeric shortcuts refer to the same retained slots used to draw the footer.
+    pub(crate) fn quick_switch_thread(&self, index: usize) -> Option<ThreadId> {
+        if index == 0 {
+            return self.quick_switch_root;
+        }
+        let thread_id = self.quick_switch_slots.get(index - 1).copied().flatten()?;
+        (self.threads.contains_key(&thread_id)
+            && !self.picker_excluded_threads.contains(&thread_id))
+        .then_some(thread_id)
+    }
+
+    pub(crate) fn quick_switch_index(event: KeyEvent) -> Option<usize> {
+        if event.kind != KeyEventKind::Press || event.modifiers != KeyModifiers::CONTROL {
+            return None;
+        }
+        match event.code {
+            KeyCode::Char(digit @ '0'..='9') => Some((digit as u8 - b'0') as usize),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quick_switch_line(
+        &mut self,
+        current_displayed_thread_id: Option<ThreadId>,
+        primary_thread_id: Option<ThreadId>,
+    ) -> Option<Line<'static>> {
+        self.quick_switch_line_with_status(current_displayed_thread_id, primary_thread_id, |_| None)
+    }
+
+    pub(crate) fn quick_switch_line_with_status<'status>(
+        &mut self,
+        current_displayed_thread_id: Option<ThreadId>,
+        primary_thread_id: Option<ThreadId>,
+        mut status_for: impl FnMut(ThreadId) -> Option<&'status ThreadStatus>,
+    ) -> Option<Line<'static>> {
+        let Some(root) = primary_thread_id else {
+            self.quick_switch_root = None;
+            self.quick_switch_slots = [None; 9];
+            return None;
+        };
+        self.refresh_quick_switch_slots(root);
+        let labels = self.quick_switch_labels(
+            &self.quick_switch_slots,
+            root,
+            self.quick_switch_slots
+                .iter()
+                .flatten()
+                .any(|id| self.quick_switch_is_active(*id)),
+        );
+        let mut spans = Vec::new();
+        for index in 0..=self.quick_switch_slots.len() {
+            let Some(thread_id) = self.quick_switch_thread(index) else {
+                continue;
+            };
+            let label = if index == 0 {
+                "root"
+            } else {
+                labels[index - 1].as_deref().expect("occupied slot has a label")
+            };
+            if !spans.is_empty() {
+                spans.push(Span::raw(" "));
+            }
+            let span = Span::raw(format!("[{index} {label}]"));
+            let entry = self.threads.get(&thread_id);
+            spans.push(span.style(agent_footer_style(
+                current_displayed_thread_id == Some(thread_id),
+                entry.is_some_and(|entry| entry.is_closed),
+                self.quick_switch_is_active(thread_id),
+                status_for(thread_id),
+            )));
+        }
+        Some(Line::from(spans))
     }
 
     /// Derives the contextual footer label for the currently displayed thread.
@@ -602,7 +1017,349 @@ mod tests {
         );
         assert_eq!(
             state.active_agent_label(Some(main_thread_id), Some(main_thread_id)),
-            Some("Main [default]".to_string())
+            Some("root".to_string())
         );
+    }
+
+    fn quick_switch_state(count: usize) -> (AgentNavigationState, ThreadId, Vec<ThreadId>) {
+        let mut state = AgentNavigationState::default();
+        let root = ThreadId::new();
+        state.upsert(root, None, None, false);
+        let agents: Vec<_> = (1..=count).map(|_| ThreadId::new()).collect();
+        for (index, id) in agents.iter().copied().enumerate() {
+            state.upsert(id, None, None, false);
+            state.set_agent_path(id, Some(format!("/root/a{}", index + 1)));
+            state.note_updated_at(id, 100_000);
+        }
+        state.set_quick_switch_width(512);
+        (state, root, agents)
+    }
+
+    #[test]
+    fn agent_footer_colors_preserve_selection_and_slot_identity_across_states() {
+        let (mut state, root, agents) = quick_switch_state(1);
+        let child = agents[0];
+        let selected_style = Style::default().fg(crate::style::accent_color()).bold().not_dim();
+        let statuses = [
+            (ThreadStatus::Active { active_flags: vec![] }, crate::style::agent_working_style()),
+            (ThreadStatus::Active { active_flags: vec![ThreadActiveFlag::WaitingOnApproval] }, crate::style::agent_waiting_style()),
+            (ThreadStatus::Active { active_flags: vec![ThreadActiveFlag::WaitingOnUserInput] }, crate::style::agent_waiting_style()),
+            (ThreadStatus::SystemError, crate::style::status_style(crate::style::StatusTone::Failure).not_bold().not_dim()),
+            (ThreadStatus::Idle, crate::style::secondary_text_style()),
+            (ThreadStatus::NotLoaded, crate::style::secondary_text_style().dim()),
+        ];
+        for (status, expected) in statuses {
+            state.set_running(child, matches!(status, ThreadStatus::Active { .. }));
+            let line = state.quick_switch_line_with_status(Some(root), Some(root), |id| (id == child).then_some(&status)).unwrap();
+            assert_eq!(line.to_string(), "[0 root] [1 /a1]");
+            assert_eq!(line.spans[0].style, selected_style);
+            assert_eq!(line.spans[2].style, expected);
+            assert!(!line.spans[2].style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+            let selected = state.quick_switch_line_with_status(Some(child), Some(root), |_| Some(&status)).unwrap();
+            assert_eq!(selected.spans[2].style, selected_style);
+            assert_eq!(state.quick_switch_thread(1), Some(child));
+        }
+        state.mark_closed(child);
+        let closed = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(closed.spans[2].style, crate::style::secondary_text_style().dim());
+        let selected_closed = state.quick_switch_line(Some(child), Some(root)).unwrap();
+        assert_eq!(selected_closed.spans[2].style, selected_style);
+    }
+
+    #[test]
+    fn agent_footer_colors_use_live_activity_when_metadata_is_missing_or_stale() {
+        let (mut state, root, agents) = quick_switch_state(1);
+        let child = agents[0];
+        assert_eq!(state.quick_switch_line(Some(root), Some(root)).unwrap().spans[2].style,
+            crate::style::secondary_text_style());
+        state.mark_running(child);
+        for status in [None, Some(ThreadStatus::Idle), Some(ThreadStatus::NotLoaded), Some(ThreadStatus::SystemError)] {
+            let line = state.quick_switch_line_with_status(Some(root), Some(root), |_| status.as_ref()).unwrap();
+            assert_eq!(line.spans[2].style, crate::style::agent_working_style());
+        }
+        state.mark_stopped(child);
+        let stale = ThreadStatus::Active { active_flags: vec![ThreadActiveFlag::WaitingOnApproval] };
+        let stopped = state.quick_switch_line_with_status(Some(root), Some(root), |_| Some(&stale)).unwrap();
+        assert_eq!(stopped.spans[2].style, crate::style::secondary_text_style());
+        state.mark_closed(child);
+        let line = state.quick_switch_line_with_status(Some(root), Some(root), |_| Some(&stale)).unwrap();
+        assert_eq!(line.spans[2].style, crate::style::secondary_text_style().dim());
+    }
+
+    #[test]
+    fn quick_switch_root_is_zero_even_without_subagents() {
+        let (mut state, root, _) = quick_switch_state(0);
+        let line = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(line.to_string(), "[0 root]");
+        assert_eq!(state.quick_switch_thread(0), Some(root));
+        assert_eq!(state.quick_switch_thread(1), None);
+        assert!(
+            line.spans[0]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn quick_switch_uses_remaining_width_instead_of_a_three_agent_limit() {
+        let (mut state, root, agents) = quick_switch_state(12);
+        let line = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert!(line.to_string().contains("[9 /a9]"));
+        assert_eq!(state.quick_switch_thread(9), Some(agents[8]));
+        assert_eq!(state.quick_switch_thread(10), None);
+
+        state.set_quick_switch_width(32); // root plus three complete /aN labels
+        let narrow = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(narrow.width(), 32);
+        assert_eq!(narrow.to_string(), "[0 root] [1 /a1] [2 /a2] [3 /a3]");
+        state.set_quick_switch_width(24);
+        let narrower = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(narrower.to_string(), "[0 root] [1 /a1] [2 /a2]");
+        assert_eq!(state.quick_switch_thread(3), None);
+    }
+
+    #[test]
+    fn quick_switch_initially_prioritizes_active_agents_and_recent_updates() {
+        let (mut state, root, agents) = quick_switch_state(5);
+        for index in [1, 3, 4] {
+            state.set_running(agents[index], true);
+        }
+        state.note_updated_at(agents[3], 130_000);
+        state.note_updated_at(agents[4], 120_000);
+        state.set_quick_switch_width(32);
+        let line = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(line.to_string(), "[0 root] [1 /a4] [2 /a5] [3 /a2]");
+    }
+
+    #[test]
+    fn quick_switch_active_arrival_replaces_inactive_without_moving_other_slots() {
+        let (mut state, root, agents) = quick_switch_state(4);
+        state.set_quick_switch_width(32);
+        state.quick_switch_line(Some(root), Some(root));
+        state.set_running(agents[3], true);
+        state.quick_switch_line(Some(root), Some(root));
+        assert_eq!(state.quick_switch_thread(1), Some(agents[0]));
+        assert_eq!(state.quick_switch_thread(2), Some(agents[1]));
+        assert_eq!(state.quick_switch_thread(3), Some(agents[3]));
+    }
+
+    #[test]
+    fn quick_switch_recent_active_replacement_requires_more_than_ten_seconds() {
+        let (mut state, root, agents) = quick_switch_state(4);
+        for id in &agents {
+            state.set_running(*id, true);
+        }
+        state.set_quick_switch_width(32);
+        state.quick_switch_line(Some(root), Some(root));
+        state.note_updated_at(agents[3], 110_000);
+        state.quick_switch_line(Some(root), Some(root));
+        assert_eq!(state.quick_switch_thread(3), Some(agents[2]));
+        state.note_updated_at(agents[3], 110_001);
+        state.quick_switch_line(Some(root), Some(root));
+        assert_eq!(state.quick_switch_thread(3), Some(agents[3]));
+        assert_eq!(state.quick_switch_thread(1), Some(agents[0]));
+        assert_eq!(state.quick_switch_thread(2), Some(agents[1]));
+        state.note_updated_at(agents[0], 500_000);
+        state.quick_switch_line(Some(root), Some(root));
+        assert_eq!(state.quick_switch_thread(1), Some(agents[0]));
+    }
+
+    #[test]
+    fn quick_switch_stale_metadata_and_repeated_redraws_do_not_reshuffle() {
+        let (mut state, root, agents) = quick_switch_state(4);
+        state.set_quick_switch_width(32);
+        state.quick_switch_line(Some(root), Some(root));
+        let slots = state.quick_switch_slots;
+        state.note_updated_at(agents[0], 90_000);
+        for _ in 0..10 {
+            state.quick_switch_line(Some(agents[1]), Some(root));
+            assert_eq!(state.quick_switch_slots, slots);
+        }
+        assert_eq!(state.last_updates[&agents[0]], 100_000);
+    }
+
+    #[test]
+    fn quick_switch_hidden_and_removed_agents_lose_their_shortcuts() {
+        let (mut state, root, agents) = quick_switch_state(3);
+        state.quick_switch_line(Some(root), Some(root));
+        state.set_picker_thread_visibility(agents[1], AgentPickerThreadVisibility::Hidden);
+        assert_eq!(state.quick_switch_thread(2), None);
+        state.quick_switch_line(Some(root), Some(root));
+        assert_eq!(state.quick_switch_thread(3), Some(agents[2]));
+        state.remove(agents[2]);
+        assert_eq!(state.quick_switch_thread(3), None);
+        state.clear();
+        assert_eq!(state.quick_switch_thread(0), None);
+    }
+
+    #[test]
+    fn quick_switch_resize_keeps_the_number_of_a_shorter_agent_that_still_fits() {
+        let (mut state, root, agents) = quick_switch_state(2);
+        state.set_agent_path(agents[0], Some("/root/schema_api_review".into()));
+        state.set_agent_path(agents[1], Some("/root/review".into()));
+        state.quick_switch_line(Some(root), Some(root));
+        assert_eq!(state.quick_switch_thread(2), Some(agents[1]));
+        state.set_quick_switch_width(20);
+        let line = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(line.to_string(), "[0 root] [2 /review]");
+        assert_eq!(state.quick_switch_thread(1), None);
+        assert_eq!(state.quick_switch_thread(2), Some(agents[1]));
+        assert!(state.quick_switch_line(None, None).is_none());
+        assert_eq!(state.quick_switch_thread(0), None);
+        assert_eq!(state.quick_switch_thread(2), None);
+    }
+
+    #[test]
+    fn quick_switch_fits_unicode_paths_and_keeps_nested_names() {
+        let (mut state, root, agents) = quick_switch_state(2);
+        state.set_agent_path(agents[0], Some("/root/审查".into()));
+        state.set_agent_path(agents[1], Some("/root/review/nested".into()));
+        state.set_quick_switch_width(18); // root plus the five-column path /审查
+        let line = state.quick_switch_line(Some(agents[0]), Some(root)).unwrap();
+        assert_eq!(line.to_string(), "[0 root] [1 /审查]");
+        assert_eq!(line.width(), 18);
+        state.set_quick_switch_width(80);
+        let line = state.quick_switch_line(Some(agents[0]), Some(root)).unwrap();
+        assert!(line.to_string().contains("[2 /review/nested]"));
+    }
+
+    #[test]
+    fn quick_switch_shortens_to_admit_active_agents_and_restores_full_names_when_wider() {
+        let (mut state, root, agents) = quick_switch_state(2);
+        state.set_agent_path(agents[0], Some("/root/schema_api_review".into()));
+        state.set_agent_path(agents[1], Some("/root/review".into()));
+        for id in &agents {
+            state.set_running(*id, true);
+        }
+        let full = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(full.to_string(), "[0 root] [1 /schema_api_review] [2 /review]");
+        state.set_quick_switch_width(33);
+        let narrow = state.quick_switch_line(Some(agents[1]), Some(root)).unwrap();
+        assert_eq!(narrow.to_string(), "[0 root] [1 /schema…] [2 /review]");
+        assert_eq!(narrow.width(), 33);
+        assert_eq!(state.quick_switch_thread(1), Some(agents[0]));
+        assert_eq!(state.quick_switch_thread(2), Some(agents[1]));
+        assert!(
+            narrow.spans.last().unwrap().style.add_modifier.contains(ratatui::style::Modifier::BOLD)
+        );
+        for _ in 0..3 {
+            state.note_updated_at(agents[1], 500_000);
+            assert_eq!(
+                state.quick_switch_line(Some(root), Some(root)).unwrap().to_string(),
+                narrow.to_string()
+            );
+        }
+        state.set_quick_switch_width(80);
+        assert_eq!(
+            state.quick_switch_line(Some(root), Some(root)).unwrap().to_string(),
+            full.to_string()
+        );
+    }
+
+    #[test]
+    fn quick_switch_shortening_protects_active_arrivals_without_evicting_existing_slots() {
+        let (mut state, root, agents) = quick_switch_state(2);
+        state.set_agent_path(agents[0], Some("/root/schema_api_review".into()));
+        state.set_agent_path(agents[1], Some("/root/review".into()));
+        state.set_quick_switch_width(33);
+        let initial = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(initial.to_string(), "[0 root] [1 /schema_api_review]");
+        state.set_running(agents[1], true);
+        let line = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(line.to_string(), "[0 root] [1 /schema…] [2 /review]");
+        assert_eq!(state.quick_switch_thread(1), Some(agents[0]));
+        assert_eq!(state.quick_switch_thread(2), Some(agents[1]));
+    }
+
+    #[test]
+    fn quick_switch_shared_prefixes_keep_distinguishing_suffixes() {
+        let (mut state, root, agents) = quick_switch_state(2);
+        for (id, path) in agents
+            .iter()
+            .zip(["/root/schema_api_review", "/root/schema_api_rewrite"])
+        {
+            state.set_agent_path(*id, Some(path.into()));
+            state.set_running(*id, true);
+        }
+        state.set_quick_switch_width(47);
+        let line = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(line.to_string(), "[0 root] [1 /schema…review] [2 /schema…rewrite]");
+        assert_eq!(line.width(), 47);
+        let labels = state.quick_switch_labels(&state.quick_switch_slots, root, true);
+        assert_ne!(labels[0], labels[1]);
+        state.set_quick_switch_width(35);
+        let narrower = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(narrower.to_string(), "[0 root] [1 /…review] [2 /…rewrite]");
+        assert_eq!(narrower.width(), 35);
+        assert_eq!(state.quick_switch_thread(1), Some(agents[0]));
+        assert_eq!(state.quick_switch_thread(2), Some(agents[1]));
+    }
+
+    #[test]
+    fn quick_switch_abbreviations_cannot_collide_with_a_complete_name() {
+        let (mut state, root, agents) = quick_switch_state(2);
+        state.set_agent_path(agents[0], Some("/root/schema_api_review".into()));
+        state.set_agent_path(agents[1], Some("/root/schema…".into()));
+        for id in &agents {
+            state.set_running(*id, true);
+        }
+        state.set_quick_switch_width(40);
+        let line = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(line.to_string(), "[0 root] [1 /schema…review] [2 /schema…]");
+        assert_eq!(line.width(), 40);
+    }
+
+    #[test]
+    fn quick_switch_shortening_threshold_and_boundaries_are_unicode_safe() {
+        assert!(AgentNavigationState::quick_switch_label_variants("/api_review").is_empty());
+        assert!(!AgentNavigationState::quick_switch_label_variants("/api_reviews").is_empty());
+        assert!(AgentNavigationState::quick_switch_label_variants("/abcdefghijklmnop").is_empty());
+        for separator in ["_", "-", "/", ".", " "] {
+            let variants = AgentNavigationState::quick_switch_label_variants(
+                &format!("/schema{separator}review"),
+            );
+            assert!(variants.contains(&"/schema…".to_string()));
+        }
+        let combining = AgentNavigationState::quick_switch_label_variants("/e\u{301}valuation_schema_review");
+        assert!(combining.iter().all(|label| {
+            label.starts_with("/e\u{301}valuation") || label.starts_with("/…")
+        }));
+        let (mut state, root, agents) = quick_switch_state(2);
+        state.set_agent_path(agents[0], Some("/root/审查流程_接口_review".into()));
+        state.set_agent_path(agents[1], Some("/root/review".into()));
+        for id in &agents {
+            state.set_running(*id, true);
+        }
+        state.set_quick_switch_width(35);
+        let line = state.quick_switch_line(Some(root), Some(root)).unwrap();
+        assert_eq!(line.to_string(), "[0 root] [1 /审查流程…] [2 /review]");
+        assert_eq!(line.width(), 35);
+    }
+
+    #[test]
+    fn quick_switch_accepts_ctrl_digits_without_stealing_plain_digits_or_escape() {
+        for digit in '0'..='9' {
+            let event = KeyEvent::new(KeyCode::Char(digit), KeyModifiers::CONTROL);
+            assert_eq!(
+                AgentNavigationState::quick_switch_index(event),
+                Some((digit as u8 - b'0') as usize)
+            );
+            assert_eq!(
+                AgentNavigationState::quick_switch_index(KeyEvent::new(
+                    KeyCode::Char(digit), KeyModifiers::NONE,
+                )),
+                None
+            );
+        }
+        for event in [
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Null, KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(AgentNavigationState::quick_switch_index(event), None);
+        }
+        let mut release = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL);
+        release.kind = KeyEventKind::Release;
+        assert_eq!(AgentNavigationState::quick_switch_index(release), None);
     }
 }

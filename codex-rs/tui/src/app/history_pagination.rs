@@ -228,13 +228,16 @@ impl App {
         for (items, completed_turn) in completion::group_completed_turn_items(items, turns) {
             // Internal prompts stay invisible, but still separate adjacent tool groups.
             for visible in items.split(|item| hidden_item_ids.contains(item.id())) {
-                cells.extend(thread_items_to_transcript_cells(
-                    Some(thread_id),
-                    cwd,
-                    visible.iter().cloned(),
-                    visibility,
-                    Some(&self.config),
-                ));
+                cells.extend(
+                    crate::thread_transcript::thread_items_to_transcript_cells_with_native_commands(
+                        Some(thread_id),
+                        cwd,
+                        visible.iter().cloned(),
+                        visibility,
+                        Some(&self.config),
+                        !self.local_settings.transcript_mode.is_owned(),
+                    ),
+                );
             }
             if let Some(turn) = completed_turn
                 && let Some(completion) = self
@@ -242,6 +245,31 @@ impl App {
                     .completion_cell(turn, Some(ReplayKind::ResumeInitialMessages))
             {
                 cells.push(Arc::new(completion));
+            }
+        }
+        if !self.local_settings.transcript_mode.is_owned() {
+            for cell in &mut cells {
+                if let Some(cell) = Arc::get_mut(cell)
+                    && let Some(exec) = cell
+                        .as_any_mut()
+                        .downcast_mut::<crate::exec_cell::ExecCell>()
+                {
+                    exec.configure_native(true, None, true);
+                }
+                if let Some(cell) = Arc::get_mut(cell) {
+                    if let Some(call) = cell
+                        .as_any_mut()
+                        .downcast_mut::<history_cell::McpToolCallCell>()
+                    {
+                        call.configure_native(true, None, true);
+                    }
+                    if let Some(call) = cell
+                        .as_any_mut()
+                        .downcast_mut::<history_cell::DynamicToolCallCell>()
+                    {
+                        call.configure_native(true, None, false);
+                    }
+                }
             }
         }
         cells

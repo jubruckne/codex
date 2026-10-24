@@ -152,6 +152,23 @@ pub(crate) fn secondary_text_style() -> Style {
         .not_bold()
 }
 
+/// Working destinations use a lighter blue than the selected agent, without bold.
+pub(crate) fn agent_working_style() -> Style {
+    let (r, g, b) = CHATGPT_BLUE_100;
+    Style::default()
+        .fg(readable_color_on(Color::Rgb(r, g, b), None))
+        .not_bold()
+        .not_dim()
+}
+
+/// Waiting destinations remain amber on both dark and light terminal backgrounds.
+pub(crate) fn agent_waiting_style() -> Style {
+    Style::default()
+        .fg(readable_color_on(Color::Rgb(230, 170, 60), None))
+        .not_bold()
+        .not_dim()
+}
+
 pub(crate) fn selection_style() -> Style {
     contrast::selection_style(default_bg(), effective_stdout_color_level())
 }

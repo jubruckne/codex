@@ -13,6 +13,7 @@ use crate::app_event::ThreadTitleDestination;
 use crate::app_server_session::ForkGoalContinuation;
 use crate::app_server_session::UnsupportedLegacyPermissionProfile;
 use crate::app_server_session::turn_permissions_overrides;
+use crate::client_only::ProtectedConfigEdits as _;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration::flow::ExternalAgentConfigMigrationFlowOutcome;
 use crate::pager_overlay::TranscriptHistoryState;
@@ -32,6 +33,10 @@ impl App {
         app_server: &mut AppServerSession,
         event: AppEvent,
     ) -> Result<AppRunControl> {
+        if let Some(reason) = crate::client_only::blocked_event(&event) {
+            self.chat_widget.add_error_message(reason.to_string());
+            return Ok(AppRunControl::Continue);
+        }
         let from_agents_overview = matches!(event, AppEvent::ForkAgentsOverviewThreadReady { .. });
         let event = if let AppEvent::ForkAgentsOverviewThreadReady { thread_id } = event {
             if self.current_displayed_thread_id() != Some(thread_id)
@@ -166,15 +171,7 @@ impl App {
             AppEvent::OpenDaemonMenu => self.open_daemon_menu(),
             AppEvent::ConfirmDaemonRestart => self.confirm_daemon_restart(),
             AppEvent::RunDaemonRestart => {
-                if self.chat_widget.remote_connection.as_ref().is_some_and(|connection| connection.is_managed_daemon)
-                    && self.daemon_restart.is_none()
-                {
-                    self.daemon_restart = Some(tokio::spawn(codex_app_server_daemon::run(
-                        codex_app_server_daemon::LifecycleCommand::Restart {
-                            feature_overrides: Default::default(),
-                        },
-                    )));
-                }
+                self.chat_widget.add_error_message(crate::client_only::DAEMON_GUIDANCE.to_string());
             }
             AppEvent::ConfirmDaemonUpdate(source) => self.confirm_daemon_update(source),
             AppEvent::RunDaemonUpdate(source) => {
@@ -2063,6 +2060,11 @@ impl App {
                     );
                 }
             }
+            AppEvent::ContextSummaryLoaded { thread_id, request_id, result } => {
+                if let Some(cell) = self.chat_widget.finish_context_summary(thread_id, request_id, result) {
+                    self.insert_history_cell(tui, cell);
+                }
+            }
             AppEvent::ThreadUsageLoaded {
                 thread_id,
                 request_id,
@@ -2603,6 +2605,14 @@ impl App {
                 self.app_event_tx.send(AppEvent::FollowTranscript);
                 self.select_session_model(app_server, model, effort, service_tier).await;
             }
+            AppEvent::AgentFeedSemantic(event) => {
+                self.apply_agent_feed_semantic(event);
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::AgentFeedReady { root, generation, snapshot } => {
+                self.apply_agent_feed_snapshot(root,generation,snapshot);
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::OpenQuickDialEditor { target, dial } => {
                 self.chat_widget.open_quick_dial_editor(target, dial);
             }
@@ -2842,7 +2852,7 @@ impl App {
                 self.local_settings.notices.hide_rate_limit_model_nudge = Some(true);
                 if let Err(err) = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .set_hide_rate_limit_model_nudge(/*acknowledged*/ true)
-                    .apply()
+                    .reject_shared_config_write()
                     .await
                 {
                     tracing::error!(
@@ -2887,7 +2897,7 @@ impl App {
             } => {
                 if let Err(err) = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .record_model_migration_seen(from_model.as_str(), to_model.as_str())
-                    .apply()
+                    .reject_shared_config_write()
                     .await
                 {
                     tracing::error!(
@@ -2900,6 +2910,7 @@ impl App {
                 }
             }
             AppEvent::OpenAgentsOverview => self.open_agents_overview(app_server),
+            AppEvent::OpenCurrentAgentsOverview => self.open_current_agents_overview(app_server),
             AppEvent::ShowMoreAgentsOverview => self.show_more_agents_overview(app_server),
             AppEvent::NewAgentsOverviewSession { cwd } => {
                 return Box::pin(self.new_agents_overview_session(tui, app_server, cwd)).await;
@@ -2915,7 +2926,7 @@ impl App {
                     AppRunControl::Continue
                         if self.primary_thread_id.is_none()
                             && self.chat_widget.selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID).is_none() => {
-                        self.open_agents_overview(app_server);
+                        self.reopen_agents_overview(app_server);
                     }
                     AppRunControl::Continue => {}
                     AppRunControl::Exit(reason) => return Ok(AppRunControl::Exit(reason)),
@@ -3365,7 +3376,7 @@ impl App {
                     crate::legacy_core::config::edit::status_line_use_colors_edit(use_theme_colors);
                 let apply_result = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .with_edits([items_edit, colors_edit])
-                    .apply()
+                    .reject_shared_config_write()
                     .await;
                 match apply_result {
                     Ok(()) => {
@@ -3408,7 +3419,7 @@ impl App {
                 let edit = crate::legacy_core::config::edit::terminal_title_items_edit(&ids);
                 let apply_result = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .with_edits([edit])
-                    .apply()
+                    .reject_shared_config_write()
                     .await;
                 match apply_result {
                     Ok(()) => {
@@ -3468,7 +3479,7 @@ impl App {
                 let edit = crate::legacy_core::config::edit::syntax_theme_edit(&name);
                 let apply_result = ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                     .with_edits([edit])
-                    .apply()
+                    .reject_shared_config_write()
                     .await;
                 match apply_result {
                     Ok(()) => {
@@ -3667,41 +3678,13 @@ impl App {
             }
         };
 
-        let save = if matches!(self.app_server_target, AppServerTarget::LocalDaemon { .. }) {
-            // Let the daemon validate shared config before writing: older daemons may
-            // not understand bindings introduced by this TUI, including new defaults.
-            app_server
-                .request_handle()
-                .request_typed::<codex_app_server_protocol::ConfigWriteResponse>(
-                    codex_app_server_protocol::ClientRequest::ConfigValueWrite {
-                        request_id: app_server.next_request_id(),
-                        params: codex_app_server_protocol::ConfigValueWriteParams {
-                            key_path: format!("tui.keymap.{context}.{action}"),
-                            value: match bindings.as_slice() {
-                                [binding] => serde_json::json!(binding),
-                                bindings => serde_json::json!(bindings),
-                            },
-                            merge_strategy: codex_app_server_protocol::MergeStrategy::Replace,
-                            file_path: Some(
-                                self.local_settings.user_config_path.display().to_string(),
-                            ),
-                            expected_version: None,
-                        },
-                    },
-                )
-                .await
-                .map(|_| ())
-                .map_err(anyhow::Error::new)
-        } else {
-            let edit = crate::legacy_core::config::edit::keymap_bindings_edit(
-                &context, &action, &bindings,
-            );
-            ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
-                .with_edits([edit])
-                .apply()
-                .await
-        };
-        match save {
+        let edit =
+            crate::legacy_core::config::edit::keymap_bindings_edit(&context, &action, &bindings);
+        match ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
+            .with_edits([edit])
+            .reject_shared_config_write()
+            .await
+        {
             Ok(()) => {
                 self.cancel_pending_key_chord();
                 self.local_settings.tui.keymap = keymap_config.clone();
@@ -3757,7 +3740,7 @@ impl App {
         let edit = crate::legacy_core::config::edit::keymap_binding_clear_edit(&context, &action);
         match ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
             .with_edits([edit])
-            .apply()
+            .reject_shared_config_write()
             .await
         {
             Ok(()) => {
@@ -3914,7 +3897,7 @@ impl App {
                     /*initial_user_message*/ None,
                 );
                 self.replace_chat_widget(ChatWidget::new_with_app_event(init));
-                self.open_agents_overview(app_server);
+                self.reopen_agents_overview(app_server);
                 AppRunControl::Continue
             }
             Err(err) => {
@@ -3982,7 +3965,7 @@ impl App {
                     /*initial_user_message*/ None,
                 );
                 self.replace_chat_widget(ChatWidget::new_with_app_event(init));
-                self.open_agents_overview(app_server);
+                self.reopen_agents_overview(app_server);
                 AppRunControl::Continue
             }
             Err(err) => {

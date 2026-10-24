@@ -6,21 +6,30 @@
 
 use crate::motion::MotionMode;
 use codex_config::ConfigLayerStack;
+#[cfg(test)]
 use codex_utils_path::resolve_symlink_write_paths;
+#[cfg(test)]
 use codex_utils_path::write_atomically;
+#[cfg(test)]
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
+#[cfg(test)]
 use toml_edit::DocumentMut;
+#[cfg(test)]
 use toml_edit::value;
 
 const DETECTION_TIMEOUT: Duration = Duration::from_millis(/*millis*/ 450);
 static ANIMATION_DEFAULT: OnceLock<MotionMode> = OnceLock::new();
 
 pub(crate) async fn initialize(stack: &ConfigLayerStack) -> anyhow::Result<()> {
-    let (animation_default, result) = initialize_with_probe(stack, detect()).await;
-    let _ = ANIMATION_DEFAULT.set(animation_default);
-    result
+    // Detect accessibility for this session only; never persist detection metadata.
+    let _ = stack;
+    let detected = tokio::time::timeout(DETECTION_TIMEOUT, detect())
+        .await
+        .unwrap_or(false);
+    let _ = ANIMATION_DEFAULT.set(MotionMode::from_animations_enabled(!detected));
+    Ok(())
 }
 
 pub(crate) fn animation_default() -> MotionMode {
@@ -30,6 +39,7 @@ pub(crate) fn animation_default() -> MotionMode {
         .unwrap_or(MotionMode::Animated)
 }
 
+#[cfg(test)]
 async fn initialize_with_probe(
     stack: &ConfigLayerStack,
     probe: impl std::future::Future<Output = bool>,
@@ -56,11 +66,13 @@ async fn initialize_with_probe(
     (animation_default, result)
 }
 
+#[cfg(test)]
 async fn initialize_file(
     path: &Path,
     animations_configured: bool,
     probe: impl std::future::Future<Output = bool>,
 ) -> anyhow::Result<()> {
+    crate::client_only::deny_shared_write()?;
     let mut doc = read_config(path)?;
     if doc
         .get("tui")
@@ -98,6 +110,7 @@ async fn initialize_file(
     Ok(())
 }
 
+#[cfg(test)]
 fn read_config(path: &Path) -> anyhow::Result<DocumentMut> {
     match std::fs::read_to_string(path) {
         Ok(contents) => contents
@@ -187,6 +200,17 @@ async fn detect() -> bool {
 #[cfg(windows)]
 #[path = "screen_reader_windows.rs"]
 mod windows_screen_reader;
+
+#[cfg(test)]
+#[tokio::test]
+async fn client_only_screen_reader_never_writes_detection_metadata() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("config.toml");
+    let original = "# official configuration\n[tui]\nanimations = true\n";
+    std::fs::write(&path, original).unwrap();
+    assert!(initialize_file(&path, true, async { true }).await.is_err());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+}
 
 #[cfg(test)]
 #[path = "screen_reader_tests.rs"]

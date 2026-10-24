@@ -172,7 +172,8 @@ async fn refreshed_active_reasoning_accepts_later_deltas_and_complete_summary() 
             .collect::<String>();
         insta::allow_duplicates! {
             insta::assert_snapshot!(transcript, @"
-            • Original analysis paragraph
+            • First heading
+              Original analysis paragraph
               Running checks
               Final paragraph
             ");
@@ -803,6 +804,178 @@ async fn misalignment_replay_blocks_when_turn_start_was_evicted() {
             app.replay_thread_snapshot(store.snapshot(), /*resume_restored_queue*/ false);
             assert!(app.chat_widget.has_misalignment_policy_violation());
             assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Chat stopped"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn status_and_reasoning_turn_tokens_survive_eviction_refresh_and_thread_switch() {
+    let mut app = make_test_app().await;
+    let thread_id = ThreadId::new();
+    let session = test_thread_session(thread_id, app.config.cwd.to_path_buf());
+    let mut store = ThreadEventStore::new_with_session(1, session.clone(), Vec::new());
+    let active = test_turn("tokens-turn", TurnStatus::InProgress, Vec::new());
+    store.push_notification(ServerNotification::TurnStarted(
+        codex_app_server_protocol::TurnStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn: active.clone(),
+        },
+    ));
+    for (input, output) in [(500, 128), (500, 128), (1_100, 300)] {
+        let mut notification = token_usage_notification(thread_id, "tokens-turn", None);
+        if let ServerNotification::ThreadTokenUsageUpdated(usage) = &mut notification {
+            usage.token_usage.total.input_tokens = input;
+            usage.token_usage.total.output_tokens = output;
+        }
+        store.push_notification(notification);
+    }
+    assert_eq!(store.buffer.len(), 1); // Start and intermediate reports have been evicted.
+    store.set_session(session, vec![active]);
+    store.rebase_buffer_after_session_refresh();
+    assert!(store.buffer.is_empty());
+    let saved = store.snapshot();
+    app.replay_thread_snapshot(saved.clone(), false);
+    let text = render_bottom_popup(&app.chat_widget, 80);
+    assert!(text.contains("↑ 1.1k ↓ 300"), "{text}");
+    let other = ThreadEventStore::new_with_session(
+        1,
+        test_thread_session(ThreadId::new(), app.config.cwd.to_path_buf()),
+        Vec::new(),
+    );
+    app.replay_thread_snapshot(other.snapshot(), false);
+    assert!(!render_bottom_popup(&app.chat_widget, 80).contains('↑'));
+    app.replay_thread_snapshot(saved, false);
+    assert!(render_bottom_popup(&app.chat_widget, 80).contains("↑ 1.1k ↓ 300"));
+}
+
+#[tokio::test]
+async fn context_growth_footer_survives_evicted_thread_events() {
+    let app = make_test_app().await;
+    let thread_id = ThreadId::new();
+    let mut store = ThreadEventStore::new_with_session(
+        1,
+        test_thread_session(thread_id, app.config.cwd.to_path_buf()),
+        Vec::new(),
+    );
+    for (id, input, context) in [("first", 40_000, 21_000), ("second", 80_000, 24_200)] {
+        store.push_notification(turn_started_notification(thread_id, id));
+        let mut notification = token_usage_notification(thread_id, id, None);
+        if let ServerNotification::ThreadTokenUsageUpdated(usage) = &mut notification {
+            usage.token_usage.total.input_tokens = input;
+            usage.token_usage.total.output_tokens = 1_000;
+            usage.token_usage.last.total_tokens = context;
+        }
+        store.push_notification(notification);
+        store.push_notification(ServerNotification::TurnCompleted(
+            codex_app_server_protocol::TurnCompletedNotification {
+                thread_id: thread_id.to_string(),
+                turn: test_turn(id, TurnStatus::Completed, Vec::new()),
+            },
+        ));
+    }
+    store.push_notification(turn_started_notification(thread_id, "third"));
+    assert_eq!(store.buffer.len(), 1);
+    let mut saved = store.snapshot().turn_tokens;
+    assert_eq!(saved.snapshot_context_growth("first"), None);
+    assert_eq!(saved.snapshot_context_growth("second"), Some(3_200));
+}
+
+#[tokio::test]
+async fn reasoning_fix_replayed_completion_replaces_streamed_parts() {
+    for (streamed, completed, expected) in [
+        (
+            vec!["**Heading**\n\nOriginal paragraph."],
+            vec!["**Heading**\n\nOriginal paragraph."],
+            "**Heading**\n\nOriginal paragraph.",
+        ),
+        (
+            vec!["**Heading**\n\nFirst.", "Second."],
+            vec!["**Heading**\n\nFirst.", "Second."],
+            "**Heading**\n\nFirst.\n\nSecond.",
+        ),
+        (
+            vec!["Partial summary."],
+            vec!["Corrected complete summary."],
+            "Corrected complete summary.",
+        ),
+        (
+            vec!["Available streamed summary."],
+            Vec::new(),
+            "Available streamed summary.",
+        ),
+        (Vec::new(), vec!["Completed only."], "Completed only."),
+    ] {
+        for replay in [false, true] {
+            let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+            let thread_id = ThreadId::new();
+            let session = test_thread_session(thread_id, app.config.cwd.to_path_buf());
+            let mut store = ThreadEventStore::new_with_session(
+                8,
+                session.clone(),
+                vec![test_turn("turn", TurnStatus::InProgress, Vec::new())],
+            );
+            let mut notifications = vec![ServerNotification::ItemStarted(ItemStartedNotification {
+                thread_id: thread_id.to_string(),
+                turn_id: "turn".into(),
+                started_at_ms: 0,
+                item: ThreadItem::Reasoning {
+                    id: "reasoning".into(),
+                    summary: Vec::new(),
+                    content: Vec::new(),
+                },
+            })];
+            for (index, part) in streamed.iter().enumerate() {
+                if index > 0 {
+                    notifications.push(ServerNotification::ReasoningSummaryPartAdded(
+                        codex_app_server_protocol::ReasoningSummaryPartAddedNotification {
+                            thread_id: thread_id.to_string(),
+                            turn_id: "turn".into(),
+                            item_id: "reasoning".into(),
+                            summary_index: index as i64,
+                        },
+                    ));
+                }
+                notifications.push(ServerNotification::ReasoningSummaryTextDelta(
+                    ReasoningSummaryTextDeltaNotification {
+                        thread_id: thread_id.to_string(),
+                        turn_id: "turn".into(),
+                        item_id: "reasoning".into(),
+                        delta: (*part).into(),
+                        summary_index: index as i64,
+                    },
+                ));
+            }
+            notifications.push(ServerNotification::ItemCompleted(ItemCompletedNotification {
+                thread_id: thread_id.to_string(),
+                turn_id: "turn".into(),
+                completed_at_ms: 0,
+                item: ThreadItem::Reasoning {
+                    id: "reasoning".into(),
+                    summary: completed.iter().map(|part| (*part).into()).collect(),
+                    content: Vec::new(),
+                },
+            }));
+            if replay {
+                for notification in notifications {
+                    store.push_notification(notification);
+                }
+                app.replay_thread_snapshot(store.snapshot(), false);
+            } else {
+                app.chat_widget.handle_thread_session(session);
+                for notification in notifications {
+                    app.chat_widget.handle_server_notification(notification, None);
+                }
+            }
+            let sources = std::iter::from_fn(|| events.try_recv().ok())
+                .filter_map(|event| match event {
+                    AppEvent::InsertHistoryCell(cell) => cell
+                        .as_any()
+                        .downcast_ref::<crate::history_cell::ReasoningSummaryCell>()
+                        .map(|cell| cell.markdown_source().to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(sources, vec![expected.to_owned()], "replay={replay}");
         }
     }
 }

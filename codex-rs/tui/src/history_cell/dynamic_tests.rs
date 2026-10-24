@@ -114,3 +114,77 @@ fn dynamic_preview_reports_hidden_lines_and_retains_full_output() {
     }
     insta::assert_snapshot!(snapshots.join("\n\n"));
 }
+
+#[test]
+fn other_tool_dynamic_native_motion_cancellation_late_response_and_owned_preservation() {
+    let mut call =
+        DynamicToolCallCell::from_item(item(DynamicToolCallStatus::InProgress, None)).unwrap();
+    let (requester, mut frames) = crate::tui::FrameRequester::test_channel();
+    call.configure_native(true, Some(requester), true);
+    let live = call
+        .display_lines(80)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(live.contains("example.inspect") && live.contains("src/main.rs"));
+    assert!(frames.try_recv().is_ok());
+    call.configure_native(true, None, false);
+    assert_eq!(call.display_lines(80).last().unwrap().to_string(), "  └ ◌");
+    call.mark_interrupted();
+    assert!(
+        call.display_lines(80)
+            .iter()
+            .any(|line| line.to_string().contains("Cancelled"))
+    );
+    assert!(call.update_from_item(item(
+        DynamicToolCallStatus::Completed,
+        Some("late result payload")
+    )));
+    let full = call.transcript_hyperlink_lines(80);
+    assert!(
+        full.iter()
+            .any(|line| line.line.to_string().contains("late result payload"))
+    );
+    for width in [1, 8, 20, 80] {
+        for mode in [
+            super::super::HistoryRenderMode::Rich,
+            super::super::HistoryRenderMode::Raw,
+        ] {
+            let compact = call.display_lines_for_mode(width, mode);
+            assert!(
+                compact
+                    .iter()
+                    .all(|line| line.width() <= usize::from(width))
+            );
+            assert!(
+                !compact
+                    .iter()
+                    .any(|line| line.to_string().contains("late result"))
+            );
+        }
+    }
+    call.configure_native(false, None, false);
+    assert!(
+        call.display_lines(80)
+            .iter()
+            .any(|line| line.to_string().contains("late result payload"))
+    );
+    assert_eq!(call.transcript_hyperlink_lines(80), full);
+    call.configure_native(true, None, false);
+    call.update_from_item(item(
+        DynamicToolCallStatus::Failed,
+        Some("sensitive failure payload"),
+    ));
+    assert!(
+        call.display_lines(80)
+            .iter()
+            .any(|line| line.to_string().contains("Error:"))
+    );
+    assert!(
+        !call
+            .display_lines(80)
+            .iter()
+            .any(|line| line.to_string().contains("sensitive failure"))
+    );
+}

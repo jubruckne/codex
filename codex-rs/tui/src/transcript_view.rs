@@ -12,6 +12,7 @@ mod copy_mode;
 mod disclosure;
 mod follow_control;
 mod footer;
+mod gap_footer;
 mod input;
 mod layout;
 mod mutations;

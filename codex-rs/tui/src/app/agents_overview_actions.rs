@@ -403,7 +403,7 @@ impl App {
                 /*initial_user_message*/ None,
             );
             self.replace_chat_widget(ChatWidget::new_with_app_event(init));
-            self.open_agents_overview(app_server);
+            self.reopen_agents_overview(app_server);
         } else {
             self.repaint_agents_overview();
             if attempted {

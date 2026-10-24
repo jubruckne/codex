@@ -36,6 +36,10 @@ fn columns(area: Rect) -> (Rect, Rect, Rect) {
 
 impl AgentsOverviewView {
     pub(super) fn render_center_rows(&self, area: Rect, buf: &mut Buffer) {
+        if self.current_tree {
+            self.render_tree_rows(area, buf);
+            return;
+        }
         let row_width = area.width;
         let area = Rect {
             width: row_width.saturating_sub(/*rhs*/ 1),

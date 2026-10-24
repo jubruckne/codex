@@ -184,6 +184,32 @@ impl ChatWidget {
         };
         let mut flex = FlexRenderable::new();
         flex.push(/*flex*/ 1, active_cell_renderable);
+        if !self.local_settings.transcript_mode.is_owned() {
+            let mut calls: Vec<_> = self.transcript.dynamic_calls.values().collect();
+            calls.sort_by_key(|call| call.started_at());
+            for call in calls {
+                flex.push(
+                    1,
+                    RenderableItem::Owned(Box::new(TranscriptAreaRenderable {
+                        child: call,
+                        top: 1,
+                        right: active_cell_right_reserve,
+                        persistent_layout: None,
+                    })),
+                );
+            }
+        }
+        if let Some(cell) = self.status_state.live_reasoning.as_deref() {
+            flex.push(
+                1,
+                RenderableItem::Owned(Box::new(TranscriptAreaRenderable {
+                    child: cell,
+                    top: 1,
+                    right: active_cell_right_reserve,
+                    persistent_layout: None,
+                })),
+            );
+        }
         for cell in self
             .realtime_conversation
             .pending_history_cells
@@ -222,6 +248,25 @@ impl ChatWidget {
         RenderableItem::Owned(Box::new(flex))
     }
 
+    /// Composer-owned query, warning, or feedback for the shared row above input.
+    pub(crate) fn composer_gap_footer(
+        &self,
+        width: u16,
+    ) -> Option<crate::bottom_pane::TranscriptFooter> {
+        self.bottom_pane
+            .composer_gap_footer(width, self.warning_display_state.count)
+    }
+
+    pub(crate) fn composer_gap_warning(&self, width: u16) -> Option<Line<'static>> {
+        self.bottom_pane
+            .composer_gap_warning(width, self.warning_display_state.count)
+    }
+
+    pub(crate) fn set_composer_gap_warning_area(&self, area: Option<Rect>) {
+        self.bottom_pane
+            .set_composer_gap_warning_area(area, self.warning_display_state.count);
+    }
+
     /// Returns the composer, footer, and active modal without the live transcript above it.
     ///
     /// Both transcript surfaces use this composition so read-only notices and cursor placement
@@ -255,8 +300,9 @@ impl ChatWidget {
             options.rendered_selection = Some(&self.rendered_selection);
             options.warning_count = self.warning_display_state.count;
             options.textarea_right_reserve = right_reserve;
-            options.separate_status_line = options.command_popup_placement
-                != crate::bottom_pane::CommandPopupPlacement::AboveComposer;
+            options.separate_status_line = options.composer_gap.is_some()
+                || options.command_popup_placement
+                    != crate::bottom_pane::CommandPopupPlacement::AboveComposer;
             let bottom_pane = self.bottom_pane.backdrop_with_options(options);
             if !self.quick_dial_menu {
                 return bottom_pane;
@@ -293,6 +339,12 @@ impl ChatWidget {
             .active_cell
             .as_deref()
             .into_iter()
+            .chain(
+                self.status_state
+                    .live_reasoning
+                    .as_deref()
+                    .map(|cell| cell as &dyn HistoryCell),
+            )
             .chain(
                 self.realtime_conversation
                     .pending_history_cells

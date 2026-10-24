@@ -1,8 +1,8 @@
-//! Retain hidden reasoning between activity calls without breaking their compact group.
+//! Retain reasoning between activity calls without breaking their compact group.
 //!
 //! Positions count preceding calls. Prepending history shifts those positions while sharing the
 //! original immutable detail cells, so expanded output keeps its chronological source content.
-//! Raw projection follows each cell's contract, retaining terminal input while hiding reasoning.
+//! Normal and raw projections follow each detail cell's visibility contract.
 
 use super::HistoryCell;
 use super::HistoryRenderMode;
@@ -26,6 +26,20 @@ impl ActivityDetails {
         }
         older.entries.append(&mut self.entries);
         *self = older;
+    }
+
+    /// Normal conversation keeps model-provided summary content even in compact activity groups.
+    pub(crate) fn visible_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.entries
+            .iter()
+            .flat_map(|(_, cell)| {
+                let mut lines = cell.display_hyperlink_lines(width);
+                if !lines.is_empty() {
+                    lines.insert(0, HyperlinkLine::from(""));
+                }
+                lines
+            })
+            .collect()
     }
 
     pub(crate) fn lines_after(

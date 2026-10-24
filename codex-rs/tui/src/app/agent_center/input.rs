@@ -89,7 +89,7 @@ impl AgentsOverviewView {
             state.help = !state.help;
             return true;
         }
-        if key.code == KeyCode::Tab
+        if !self.current_tree && key.code == KeyCode::Tab
             && !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)

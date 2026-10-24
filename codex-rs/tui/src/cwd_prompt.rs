@@ -1,5 +1,6 @@
 //! Resume/fork directory choices with shared picker presentation and caller-owned persistence.
 
+use crate::client_only::ProtectedConfigEdits as _;
 use std::path::Path;
 
 use crate::bottom_pane::picker_option_list;
@@ -172,7 +173,7 @@ async fn persist_remembered_cwd_selection(
     let mode = selection.remembered_mode()?;
     match ConfigEditsBuilder::for_config_path(config.user_config_path.as_path())
         .set_resume_cwd(mode)
-        .apply()
+        .reject_shared_config_write()
         .await
     {
         Ok(()) => None,

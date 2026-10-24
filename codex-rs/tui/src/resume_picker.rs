@@ -1,3 +1,4 @@
+use crate::client_only::ProtectedConfigEdits as _;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -1967,7 +1968,7 @@ impl PickerState {
 
         ConfigEditsBuilder::new(&persistence.codex_home)
             .set_session_picker_view(SessionPickerViewMode::from(self.density))
-            .apply()
+            .reject_shared_config_write()
             .await
             .map_err(|err| color_eyre::eyre::eyre!("failed to write config.toml: {err}"))?;
 

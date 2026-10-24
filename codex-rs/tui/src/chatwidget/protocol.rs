@@ -59,6 +59,18 @@ impl ChatWidget {
                 }
             }
             ServerNotification::ThreadTokenUsageUpdated(notification) => {
+                self.status_state.turn_tokens.observe_with_context(
+                    &notification.turn_id,
+                    notification.token_usage.total.input_tokens,
+                    notification.token_usage.total.output_tokens,
+                    notification.token_usage.last.total_tokens,
+                );
+                self.bottom_pane.set_turn_tokens(
+                    self.turn_lifecycle
+                        .agent_turn_running
+                        .then(|| self.status_state.turn_tokens.counts())
+                        .flatten(),
+                );
                 self.set_token_info(Some(token_usage_info_from_app_server(
                     notification.token_usage,
                 )));
@@ -87,6 +99,32 @@ impl ChatWidget {
                 self.on_thread_settings_updated(notification);
             }
             ServerNotification::TurnStarted(notification) => {
+                if !self.local_settings.transcript_mode.is_owned()
+                    && self
+                        .turn_lifecycle
+                        .last_turn_id
+                        .as_deref()
+                        .is_some_and(|id| id != notification.turn.id)
+                {
+                    self.flush_active_cell();
+                }
+                if !from_replay {
+                    if self.token_info.is_none() && self.turn_lifecycle.last_turn_id.is_none() {
+                        self.status_state.turn_tokens.seed_empty_thread();
+                    }
+                    if let Some(info) = &self.token_info {
+                        if let Some(id) = self.turn_lifecycle.last_turn_id.as_deref() {
+                            self.status_state.turn_tokens.observe(
+                                id,
+                                info.total_token_usage.input_tokens,
+                                info.total_token_usage.output_tokens,
+                            );
+                        }
+                    }
+                    self.status_state.turn_tokens.start(&notification.turn.id);
+                    self.bottom_pane
+                        .set_turn_tokens(self.status_state.turn_tokens.counts());
+                }
                 if from_replay {
                     self.restore_realtime_transcripts_before_turn(&notification.turn.id);
                 } else {

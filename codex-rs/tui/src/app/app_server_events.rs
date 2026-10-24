@@ -98,6 +98,7 @@ impl App {
     ) {
         match event {
             AppServerEvent::Lagged { skipped } => {
+                self.invalidate_agent_feed();
                 tracing::warn!(
                     skipped,
                     "app-server event consumer lagged; dropping ignored events"
@@ -226,6 +227,17 @@ impl App {
 
         if let ServerNotification::ThreadStatusChanged(status) = &notification {
             let _ = self.dynamic_tool_status_updates.send(status.clone());
+            if let Ok(thread_id) = ThreadId::from_string(&status.thread_id)
+                && self.agent_navigation.get(&thread_id).is_some()
+            {
+                self.agent_navigation
+                    .note_updated_at(thread_id, chrono::Utc::now().timestamp_millis());
+                if matches!(status.status, codex_app_server_protocol::ThreadStatus::Active { .. }) {
+                    self.agent_navigation.mark_running(thread_id);
+                } else {
+                    self.agent_navigation.mark_stopped(thread_id);
+                }
+            }
         }
 
         if let ServerNotification::ThreadStarted(started) = &notification
@@ -270,6 +282,11 @@ impl App {
                 .or_default();
         }
         self.track_agents_overview_notification(&notification);
+        self.observe_agent_feed(&notification);
+        // Status colors must see the new metadata rather than the previous wait/error state.
+        if matches!(&notification, ServerNotification::ThreadStatusChanged(_)) {
+            self.sync_agent_navigation_strip();
+        }
         // Retained blank sessions stay subscribed after their event channels are cleared.
         if let ServerNotification::ThreadSettingsUpdated(settings) = &notification
             && let Ok(thread_id) = ThreadId::from_string(&settings.thread_id)

@@ -1,4 +1,4 @@
-//! Opportunistic attachment may fall back; automatic startup requires a shared server.
+//! Attachment-only startup preserves the official daemon and rejects fallback.
 
 use super::*;
 use crate::legacy_core::config::ConfigBuilder;
@@ -64,8 +64,9 @@ fn daemon_launch_telemetry_records_once_on_connection_or_early_return() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn daemon_feature_compatibility_respects_required_and_optional_attachment()
+async fn client_only_daemon_feature_compatibility_respects_invocation_overrides()
 -> color_eyre::Result<()> {
     use codex_app_server_protocol::JSONRPCMessage;
     use futures::SinkExt;
@@ -73,166 +74,137 @@ async fn daemon_feature_compatibility_respects_required_and_optional_attachment(
     use serde_json::json;
     use tokio_tungstenite::tungstenite::Message;
 
-    for allow_embedded_fallback in [false, true] {
-        for scenario in [
-            "matching",
-            "unreachable daemon",
-            "conflicting client",
-            "explicit enable",
-            "mixed flags",
-            "missing enabled",
-            "managed",
-            "legacy managed",
-            "old requirements server",
-            "unsupported RPC",
-        ] {
-            let cli_overrides = codex_utils_cli::CliConfigOverrides {
-                raw_overrides: match scenario {
-                    "matching" => vec![
-                        "features.instant_interrupt=true",
-                        "features.remote_compaction_v2=true",
-                        "features.shell_tool=true",
-                        "features.zz_missing=false",
-                    ],
-                    "unreachable daemon" => Vec::new(),
-                    "explicit enable" => vec!["features.api_key_model_discovery=true"],
-                    "mixed flags" => vec![
-                        "features.zz_overridden=true",
-                        "features={api_key_model_discovery=false,code_mode_host=false,instant_interrupt=true}",
-                        "features.code_mode_host=true",
-                    ],
-                    "missing enabled" => vec!["features.zz_missing=true"],
-                    _ => vec!["features.api_key_model_discovery=false"],
+    for scenario in [
+        "matching",
+        "stale overrides",
+        "fullscreen frontend policy",
+        "frontend policy and server override",
+        "conflicting client",
+        "explicit enable",
+        "managed",
+        "legacy managed",
+        "old requirements server",
+        "unsupported RPC",
+    ] {
+        let home = TempDir::new()?;
+        let mut config = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .build()
+            .await?;
+        config.features.enable(Feature::ApiKeyModelDiscovery)?;
+        let cli_overrides = match scenario {
+            "matching" | "stale overrides" => Vec::new(),
+            "fullscreen frontend policy" | "frontend policy and server override" => {
+                // Match the user's -c flag plus the entry point's injected local policy.
+                let mut raw_overrides = vec!["tui.fullscreen_transcript=true".into(), "features.daemon_auto_start=false".into()];
+                if scenario == "frontend policy and server override" {
+                    raw_overrides.push("features.api_key_model_discovery=false".into());
                 }
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            }
-            .parse_overrides()
-            .unwrap();
-            let home = TempDir::new()?;
-            let config = ConfigBuilder::default()
-                .codex_home(home.path().to_path_buf())
-                .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
-                .build()
-                .await?;
-            let features = [
-                (Feature::ApiKeyModelDiscovery, scenario != "explicit enable", "beta"),
-                (Feature::CodeModeHost, false, "beta"),
-                (Feature::InstantInterrupt, true, "beta"),
-                (Feature::RemoteCompactionV2, false, "stable"),
-                (Feature::ShellTool, false, "removed"),
-            ].map(|(feature, enabled, stage)| {
-                json!({"name": feature.key(), "stage": stage, "enabled": enabled, "defaultEnabled": false})
-            });
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-            let target = AppServerTarget::LocalDaemon {
-                endpoint: RemoteAppServerEndpoint::WebSocket {
-                    websocket_url: format!("ws://{}", listener.local_addr()?),
-                    auth_token: None,
-                },
-                allow_embedded_fallback,
-            };
-            if cli_overrides.is_empty() {
-                drop(listener);
-                let result =
-                    daemon_startup::compatibility_warning(&target, &config, &cli_overrides).await;
-                assert!(matches!(
-                    (allow_embedded_fallback, result),
-                    (true, Ok(Some(_))) | (false, Err(_))
-                ));
-                continue;
-            }
-            let server = tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
-                while let Some(Ok(Message::Text(text))) = socket.next().await {
-                    let JSONRPCMessage::Request(request) = serde_json::from_str(&text).unwrap()
-                    else {
-                        continue;
-                    };
-                    let response = match request.method.as_str() {
-                        "initialize" => {
-                            json!({"id": request.id, "result": {"userAgent": "daemon-test"}})
-                        }
-                        "config/read" => {
-                            json!({"id": request.id, "result": {"config": {}, "layers": [{
-                                "name": {"type": "legacyManagedConfigTomlFromFile"}, "config":
-                                if scenario == "legacy managed" {
-                                    json!({"features": {"api_key_model_discovery": true}})
-                                } else { json!({}) }
-                            }]}})
-                        }
-                        "configRequirements/read" if scenario == "old requirements server" => {
-                            json!({"id": request.id, "error": {"code": -32600, "message": "Invalid request: unknown variant `configRequirements/read`"}})
-                        }
-                        "configRequirements/read" => json!({"id": request.id, "result": {
-                            "requirements": if scenario == "managed" {
-                                json!({"featureRequirements": {"api_key_model_discovery": true}})
-                            } else { json!(null) }
-                        }}),
-                        "experimentalFeature/list" if scenario == "unsupported RPC" => {
-                            json!({"id": request.id, "error": {"code": -32601, "message": "method not found"}})
-                        }
-                        "experimentalFeature/list" => {
-                            assert_eq!(request.params.unwrap()["threadId"], json!(null));
-                            json!({"id": request.id, "result": {"data": features, "nextCursor": null}})
-                        }
-                        _ => panic!("unexpected request: {}", request.method),
-                    };
-                    socket
-                        .send(Message::Text(response.to_string().into()))
-                        .await
-                        .unwrap();
-                }
-            });
-            let result =
-                daemon_startup::compatibility_warning(&target, &config, &cli_overrides).await;
-            server.await?;
-            if matches!(scenario, "matching" | "managed" | "legacy managed") {
-                assert_eq!(result?, None);
-                continue;
-            }
-            let reason = match scenario {
-                "explicit enable" => "This session requires api_key_model_discovery to be enabled",
-                "conflicting client" | "old requirements server" | "mixed flags" => {
-                    "This session requires api_key_model_discovery to be disabled"
-                }
-                "missing enabled" => "This session requires zz_missing to be enabled",
-                "unsupported RPC" => "Experimental feature request failed",
-                _ => unreachable!(),
-            };
-            let restartable = scenario != "unsupported RPC";
-            if allow_embedded_fallback && !restartable {
-                let warning = result?.expect("optional attachment should fall back");
-                assert_eq!(
-                    warning,
-                    format!("Running without the shared background server: {reason}.")
-                );
+                codex_utils_cli::CliConfigOverrides { raw_overrides }.parse_overrides().map_err(color_eyre::eyre::Report::msg)?
+            },
+            _ => vec![(
+                "features.api_key_model_discovery".to_string(),
+                toml::Value::Boolean(scenario == "explicit enable"),
+            )],
+        };
+        let features = [
+            Feature::DaemonAutoStart,
+            Feature::ApiKeyModelDiscovery,
+            Feature::CodeModeHost,
+            Feature::AuthElicitation,
+            Feature::McpOAuthRefreshCoordination,
+        ].map(|feature| {
+            let enabled = if feature == Feature::DaemonAutoStart {
+                true // The service is allowed to have a different auto-start preference.
+            } else if feature == Feature::ApiKeyModelDiscovery && matches!(scenario, "stale overrides" | "explicit enable") {
+                false
             } else {
-                let error = result.unwrap_err();
-                assert_eq!(error.restart_features.is_some(), restartable);
-                if scenario == "mixed flags" {
-                    assert_eq!(
-                        error.restart_features,
-                        Some(std::collections::BTreeMap::from([
-                            ("api_key_model_discovery".to_string(), false),
-                            ("code_mode_host".to_string(), true),
-                        ]))
-                    );
+                config.features.enabled(feature)
+            };
+            json!({"name": feature.key(), "stage": "beta", "enabled": enabled, "defaultEnabled": false})
+        });
+        let socket_path =
+            AbsolutePathBuf::from_absolute_path_checked(home.path().join("official.sock"))?;
+        let listener = tokio::net::UnixListener::bind(socket_path.as_path())?;
+        let target = AppServerTarget::LocalDaemon {
+            endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+            allow_embedded_fallback: false,
+        };
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let JSONRPCMessage::Request(request) = serde_json::from_str(&text).unwrap()
+                else {
+                    continue;
+                };
+                if scenario == "fullscreen frontend policy" {
+                    assert_eq!(request.method, "initialize", "frontend policy must not query or mutate server feature settings");
                 }
-                let error = error.to_string();
-                assert_eq!(
-                    error,
-                    format!(
-                        "Cannot use the shared background server: {reason}.\n{}",
-                        daemon_startup::FAILURE_HINT
-                    )
-                );
-                if scenario == "explicit enable" && !allow_embedded_fallback {
-                    insta::assert_snapshot!("daemon_feature_mismatch_error", error);
-                }
+                let response = match request.method.as_str() {
+                    "initialize" => {
+                        json!({"id": request.id, "result": {"userAgent": "daemon-test"}})
+                    }
+                    "config/read" => {
+                        json!({"id": request.id, "result": {"config": {}, "layers": [{
+                            "name": {"type": "legacyManagedConfigTomlFromFile"}, "config":
+                            if scenario == "legacy managed" {
+                                json!({"features": {"api_key_model_discovery": true}})
+                            } else { json!({}) }
+                        }]}})
+                    }
+                    "configRequirements/read" if scenario == "old requirements server" => {
+                        json!({"id": request.id, "error": {"code": -32600, "message": "Invalid request: unknown variant `configRequirements/read`"}})
+                    }
+                    "configRequirements/read" => json!({"id": request.id, "result": {
+                        "requirements": if scenario == "managed" {
+                            json!({"featureRequirements": {"api_key_model_discovery": true}})
+                        } else { json!(null) }
+                    }}),
+                    "experimentalFeature/list" if scenario == "unsupported RPC" => {
+                        json!({"id": request.id, "error": {"code": -32601, "message": "method not found"}})
+                    }
+                    "experimentalFeature/list" => {
+                        assert_eq!(request.params.unwrap()["threadId"], json!(null));
+                        json!({"id": request.id, "result": {"data": features, "nextCursor": null}})
+                    }
+                    _ => panic!("unexpected request: {}", request.method),
+                };
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
             }
+        });
+        let result =
+            daemon_startup::compatibility_warning(&target, &config, &cli_overrides).await;
+        tokio::time::timeout(Duration::from_secs(5), server).await??;
+        if matches!(
+            scenario,
+            "matching" | "stale overrides" | "managed" | "legacy managed" | "fullscreen frontend policy"
+        ) {
+            assert_eq!(result?, None);
+            continue;
+        }
+        let reason = match scenario {
+            "explicit enable" => "This session requires api_key_model_discovery to be enabled",
+            "conflicting client" | "old requirements server" | "frontend policy and server override" => {
+                "This session requires api_key_model_discovery to be disabled"
+            }
+            "unsupported RPC" => "Experimental feature request failed",
+            _ => unreachable!(),
+        };
+        let error = result.unwrap_err().to_string();
+        assert_eq!(
+            error,
+            format!(
+                "Cannot use the shared background server: {reason}.\n{}",
+                daemon_startup::FAILURE_HINT
+            )
+        );
+        if scenario == "explicit enable" {
+            insta::assert_snapshot!("daemon_feature_mismatch_error", error);
         }
     }
     Ok(())
@@ -258,7 +230,7 @@ async fn daemon_connection_rejects_unprotected_socket_before_handshake() -> colo
 }
 
 #[tokio::test]
-async fn daemon_startup_falls_back_only_for_implicit_endpoints() -> color_eyre::Result<()> {
+async fn client_only_daemon_startup_preserves_target_without_fallback() -> color_eyre::Result<()> {
     for scenario in [
         "missing socket",
         "failed handshake",
@@ -271,7 +243,7 @@ async fn daemon_startup_falls_back_only_for_implicit_endpoints() -> color_eyre::
             .build()
             .await?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let endpoint = if scenario == "missing socket" {
+        let endpoint = if matches!(scenario, "missing socket" | "required daemon") {
             RemoteAppServerEndpoint::UnixSocket {
                 socket_path: AbsolutePathBuf::from_absolute_path_checked(
                     home.path().join("gone.sock"),
@@ -312,26 +284,17 @@ async fn daemon_startup_falls_back_only_for_implicit_endpoints() -> color_eyre::
         )
         .await;
         reject_handshake.abort();
-        if scenario == "explicit endpoint" || scenario == "required daemon" {
-            assert!(result.is_err());
-            if scenario == "required daemon" {
-                let message = result.err().unwrap().to_string();
-                assert!(message.contains("rerun the same command with --no-daemon"));
-                assert!(message.contains("failed to connect to remote app server"));
-            }
-            assert_eq!(target, original_target);
-            assert!(state_db.is_none());
+        let error = result
+            .err()
+            .expect("attachment failure must never embed")
+            .to_string();
+        if scenario == "required daemon" {
+            assert!(error.contains("failed to connect to remote app server"));
         } else {
-            let server = AppServerSession::new(
-                crate::backend_id::BackendId::new(),
-                result?,
-                target.thread_params_mode(),
-            );
-            assert!(server.uses_embedded_app_server());
-            assert_eq!(target, AppServerTarget::Embedded);
-            assert!(state_db.is_some());
-            server.shutdown().await?;
+            assert!(error.contains("embedded execution and fallback are disabled"));
         }
+        assert_eq!(target, original_target);
+        assert!(state_db.is_none());
     }
     Ok(())
 }

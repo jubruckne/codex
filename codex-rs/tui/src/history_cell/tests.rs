@@ -2716,11 +2716,43 @@ fn reasoning_summary_block() {
         &test_cwd(),
     );
 
-    let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered_display, Vec::<String>::new());
+    let lines = cell.display_lines(80);
+    let body = lines.iter().flat_map(|line| &line.spans)
+        .find(|span| span.content.contains("Detailed reasoning goes here.")).unwrap();
+    assert_eq!(body.style.fg, Some(crate::terminal_palette::best_color((242, 182, 50))));
+    assert!(body.style.add_modifier.contains(Modifier::ITALIC));
+    assert!(!body.style.add_modifier.contains(Modifier::DIM));
+    let rendered_display = render_lines(&lines);
+    assert_eq!(rendered_display, render_transcript(cell.as_ref()));
 
     let rendered_transcript = render_transcript(cell.as_ref());
-    assert_eq!(rendered_transcript, vec!["• Detailed reasoning goes here."]);
+    assert_eq!(
+        rendered_transcript,
+        vec![
+            "• High level reasoning",
+            "  ",
+            "  Detailed reasoning goes here."
+        ]
+    );
+}
+
+#[test]
+fn reasoning_summary_wraps_at_sixty_percent_and_follows_terminal_resizing() {
+    let cell = new_reasoning_summary_block(
+        vec!["Reasoning about rendering and searching 思考 output. ".repeat(20)],
+        &test_cwd(),
+    );
+    let wide = cell.display_lines(200);
+    assert!(wide.len() > 1);
+    assert!(wide.iter().all(|line| line.width() <= 120));
+    let medium = cell.display_lines(100);
+    assert!(medium.len() > wide.len());
+    assert!(medium.iter().all(|line| line.width() <= 60));
+    assert_eq!(wide, cell.transcript_lines(200));
+    let narrow = cell.display_lines(40);
+    assert!(narrow.len() > wide.len());
+    assert!(narrow.iter().all(|line| line.width() <= 24));
+    assert_eq!(wide, cell.display_lines(200));
 }
 
 #[test]
@@ -2788,7 +2820,7 @@ async fn reasoning_summary_block_respects_config_overrides() {
     );
 
     let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered_display, Vec::<String>::new());
+    assert_eq!(rendered_display, render_transcript(cell.as_ref()));
 }
 
 #[test]
@@ -2829,7 +2861,7 @@ fn reasoning_summary_block_keeps_title_only_summary_in_expanded_transcript() {
     );
 
     let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered_display, Vec::<String>::new());
+    assert_eq!(rendered_display, render_transcript(cell.as_ref()));
 
     let rendered_transcript = render_transcript(cell.as_ref());
     assert_eq!(
@@ -2846,14 +2878,17 @@ fn reasoning_summary_block_splits_header_and_summary_when_present() {
     );
 
     let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered_display, Vec::<String>::new());
+    assert_eq!(rendered_display, render_transcript(cell.as_ref()));
 
     let rendered_transcript = render_transcript(cell.as_ref());
-    assert_eq!(rendered_transcript, vec!["• We should fix the bug next."]);
+    assert_eq!(
+        rendered_transcript,
+        vec!["• High level plan", "  ", "  We should fix the bug next."]
+    );
 }
 
 #[test]
-fn reasoning_summary_block_hides_empty_html_comment_parts() {
+fn reasoning_summary_block_preserves_titles_with_html_comment_parts() {
     let cell = new_reasoning_summary_block(
         vec![
             "**Checking the first thing**\n\n<!-- -->".to_string(),
@@ -2863,10 +2898,20 @@ fn reasoning_summary_block_hides_empty_html_comment_parts() {
     );
 
     let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered_display, Vec::<String>::new());
+    assert_eq!(rendered_display, render_transcript(cell.as_ref()));
 
     let rendered_transcript = render_transcript(cell.as_ref());
-    assert_eq!(rendered_transcript, Vec::<String>::new());
+    assert!(
+        rendered_transcript
+            .join("\n")
+            .contains("Checking the second thing")
+    );
+    assert!(
+        rendered_transcript
+            .join("\n")
+            .contains("Checking the first thing")
+    );
+    assert!(!rendered_transcript.is_empty());
 }
 
 #[test]
@@ -2881,10 +2926,16 @@ fn reasoning_summary_block_preserves_bold_content_after_empty_html_comment_part(
     );
 
     let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered_display, Vec::<String>::new());
+    assert_eq!(rendered_display, render_transcript(cell.as_ref()));
 
     let rendered_transcript = render_transcript(cell.as_ref());
-    assert_eq!(rendered_transcript, vec!["• Important conclusion"]);
+    assert!(
+        rendered_transcript
+            .join("\n")
+            .contains("Important conclusion")
+    );
+    assert!(rendered_transcript.join("\n").contains("Status"));
+    assert!(!rendered_transcript.is_empty());
 
     let cell = new_reasoning_summary_block(
         vec![
@@ -2895,11 +2946,12 @@ fn reasoning_summary_block_preserves_bold_content_after_empty_html_comment_part(
     );
 
     let rendered_transcript = render_transcript(cell.as_ref());
-    assert_eq!(rendered_transcript, vec!["• Result: keep this"]);
+    assert!(rendered_transcript.join("\n").contains("Result: keep this"));
+    assert!(!rendered_transcript.is_empty());
 }
 
 #[test]
-fn reasoning_summary_block_strips_header_after_leading_empty_part() {
+fn reasoning_summary_block_keeps_header_after_leading_placeholder() {
     let cell = new_reasoning_summary_block(
         vec![
             "**Status**\n\n<!-- -->".to_string(),
@@ -2909,14 +2961,17 @@ fn reasoning_summary_block_strips_header_after_leading_empty_part() {
     );
 
     let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered_display, Vec::<String>::new());
+    assert_eq!(rendered_display, render_transcript(cell.as_ref()));
 
     let rendered_transcript = render_transcript(cell.as_ref());
-    assert_eq!(rendered_transcript, vec!["• Tests passed"]);
+    assert!(rendered_transcript.join("\n").contains("Tests passed"));
+    assert!(rendered_transcript.join("\n").contains("Checking tests"));
+    assert!(rendered_transcript.join("\n").contains("Status"));
+    assert!(!rendered_transcript.is_empty());
 }
 
 #[test]
-fn reasoning_summary_block_drops_empty_part_after_real_content() {
+fn reasoning_summary_block_keeps_title_only_part_after_real_content() {
     let cell = new_reasoning_summary_block(
         vec![
             "**Plan**\n\ndone".to_string(),
@@ -2926,10 +2981,13 @@ fn reasoning_summary_block_drops_empty_part_after_real_content() {
     );
 
     let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered_display, Vec::<String>::new());
+    assert_eq!(rendered_display, render_transcript(cell.as_ref()));
 
     let rendered_transcript = render_transcript(cell.as_ref());
-    assert_eq!(rendered_transcript, vec!["• done"]);
+    assert!(rendered_transcript.join("\n").contains("Checking tests"));
+    assert!(rendered_transcript.join("\n").contains("done"));
+    assert!(rendered_transcript.join("\n").contains("Plan"));
+    assert!(!rendered_transcript.is_empty());
 }
 
 #[test]
@@ -2940,10 +2998,13 @@ fn reasoning_summary_block_preserves_literal_html_comment() {
     );
 
     let rendered_display = render_lines(&cell.display_lines(/*width*/ 80));
-    assert_eq!(rendered_display, Vec::<String>::new());
+    assert_eq!(rendered_display, render_transcript(cell.as_ref()));
 
     let rendered_transcript = render_transcript(cell.as_ref());
-    assert_eq!(rendered_transcript, vec!["• Use <!-- --> in JSX."]);
+    assert_eq!(
+        rendered_transcript,
+        vec!["• Plan", "  ", "  Use <!-- --> in JSX."]
+    );
 }
 
 #[test]

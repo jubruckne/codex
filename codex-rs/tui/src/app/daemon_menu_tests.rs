@@ -7,41 +7,16 @@ use crossterm::event::KeyCode;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
-async fn daemon_version_notice_preserves_manual_update_guidance() {
+async fn client_only_daemon_version_notice_preserves_actual_versions() {
     let mut app = make_test_app().await;
     app.app_server_target = AppServerTarget::LocalDaemon {
-        allow_embedded_fallback: true,
+        allow_embedded_fallback: false,
         endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
             socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock").unwrap(),
         },
     };
-    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    app.chat_widget.show_bottom_pane_view(Box::new(view));
-    let mut notices = Vec::new();
-    for (client, server, comparison) in [
-        ("0.155.0-alpha.23", "0.155.0-alpha.22", "older than"),
-        ("0.155.0-alpha.23", "0.156.0", "different from"),
-        ("0.0.0", "0.156.0", "different from"),
-    ] {
+    for (client, server) in [("0.155.0", "0.154.0"), ("0.0.0", "0.161.0")] {
         app.local_settings.tui.show_server_version_notice = true;
-        assert_eq!(
-            app.initialize_server_version_notice(client, Some(server)),
-            Some(format!(
-                "A background Codex service is running v{server}, {comparison} your Codex CLI v{client}."
-            ))
-        );
-        let overview = render_bottom_popup(&app.chat_widget, /*width*/ 100);
-        notices.push(
-            overview
-                .lines()
-                .find(|line| line.contains("Service v"))
-                .unwrap()
-                .trim()
-                .to_string(),
-        );
-        assert_eq!(app.pending_update_action, None);
-
-        app.local_settings.tui.show_server_version_notice = false;
         assert_eq!(
             app.initialize_server_version_notice(client, Some(server)),
             None
@@ -54,270 +29,81 @@ async fn daemon_version_notice_preserves_manual_update_guidance() {
                 .server_version_notice,
             None
         );
+        assert_eq!(app.pending_update_action, None);
     }
-    insta::assert_snapshot!(notices.join("\n"), @"
-    Service v0.155.0-alpha.22 < Codex CLI v0.155.0-alpha.23 · /daemon
-    Service v0.156.0 ≠ Codex CLI v0.155.0-alpha.23 · /daemon
-    Service v0.156.0 ≠ Codex CLI v0.0.0 · /daemon
-    ");
 }
 
 #[tokio::test]
-async fn daemon_menu_is_read_only_and_confirmation_can_cancel_or_handoff() {
+async fn client_only_daemon_menu_is_read_only_even_with_cli_identity() {
     let mut app = make_test_app().await;
     let (chat, _, mut rx, _) = make_chatwidget_manual_with_sender().await;
     app.chat_widget = chat;
-    let package = tempfile::tempdir().unwrap();
-    std::fs::create_dir(package.path().join("bin")).unwrap();
-    std::fs::write(package.path().join("bin/codex"), "CLI").unwrap();
-    std::fs::write(package.path().join("codex-package.json"), "{}").unwrap();
+    // Even a valid executable identity cannot enable lifecycle actions.
     app.daemon_cli_executable =
-        Some(AbsolutePathBuf::from_absolute_path(package.path().join("bin/codex")).unwrap());
-    app.app_server_target = AppServerTarget::LocalDaemon {
-        allow_embedded_fallback: true,
-        endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
-            socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock").unwrap(),
-        },
-    };
+        Some(AbsolutePathBuf::from_absolute_path(std::env::current_exe().unwrap()).unwrap());
     app.chat_widget.remote_connection = Some(RemoteConnectionStatus {
         address: "local".into(),
-        version: "v0.153.0".into(),
+        version: "v0.161.0".into(),
         is_local_daemon: true,
         is_managed_daemon: true,
     });
-    app.initialize_server_version_notice("0.154.0", Some("0.153.0"));
-    let view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    app.chat_widget.show_bottom_pane_view(Box::new(view));
-    let overview = render_bottom_popup(&app.chat_widget, /*width*/ 80);
-    insta::assert_snapshot!(overview.lines().find(|line| line.contains("Service v")).unwrap().trim(), @"Service v0.153.0 < Codex CLI v0.154.0 · /daemon");
-    let executable = app.daemon_cli_executable.clone();
-    for (width, source, snapshot) in [
-        (
-            80,
-            DaemonUpdateSource::PublicStable,
-            "daemon_stable_confirmation",
-        ),
-        (100, DaemonUpdateSource::ThisCli, "daemon_cli_confirmation"),
-    ] {
-        app.daemon_cli_executable = executable.clone();
-        app.open_daemon_menu();
-        if source == DaemonUpdateSource::PublicStable {
-            insta::assert_snapshot!(
-                "daemon_menu",
-                render_bottom_popup(&app.chat_widget, /*width*/ 80)
-            );
-        } else {
-            app.chat_widget.handle_key_event(KeyCode::Down.into());
-        }
-        assert!(rx.try_recv().is_err());
-        app.chat_widget.handle_key_event(KeyCode::Enter.into());
-        assert!(
-            matches!(rx.try_recv().unwrap(), AppEvent::ConfirmDaemonUpdate(selected) if selected == source)
-        );
-        app.daemon_cli_executable = Some(
-            AbsolutePathBuf::from_absolute_path(if cfg!(windows) {
-                r"C:\cli-build\bin\codex"
-            } else {
-                "/x/cli-build/bin/codex"
-            })
-            .unwrap(),
-        );
-        app.confirm_daemon_update(source);
-        insta::assert_snapshot!(
-            snapshot,
-            render_bottom_popup(&app.chat_widget, width)
-                .replace(r"C:\cli-build\bin\codex", "/x/cli-build/bin/codex")
-        );
-        // The default choice cancels without emitting an update or exiting.
-        app.chat_widget.handle_key_event(KeyCode::Enter.into());
-        assert!(rx.try_recv().is_err());
-        assert_eq!(app.pending_update_action, None);
-        app.confirm_daemon_update(source);
-        app.chat_widget.handle_key_event(KeyCode::Down.into());
-        app.chat_widget.handle_key_event(KeyCode::Enter.into());
-        assert!(
-            matches!(rx.try_recv().unwrap(), AppEvent::RunDaemonUpdate(selected) if selected == source)
-        );
-    }
-
-    app.daemon_cli_executable = executable.clone();
     app.open_daemon_menu();
-    let mut terminal = crate::custom_terminal::Terminal::with_options(
-        crate::test_backend::VT100Backend::new(/*width*/ 120, /*height*/ 30),
-    )
-    .unwrap();
-    let area = Rect::new(0, 0, 120, 30);
-    terminal.set_viewport_area(area);
-    crate::terminal_palette::with_test_default_colors(
-        crate::terminal_probe::DefaultColors {
-            fg: (229, 229, 229),
-            bg: (30, 40, 56),
-        },
-        || {
-            terminal
-                .draw(|frame| app.chat_widget.render(area, frame.buffer_mut()))
-                .unwrap()
-        },
-    );
-    app.chat_widget.handle_key_event(KeyCode::Down.into());
-    app.chat_widget.handle_key_event(KeyCode::Down.into());
-    app.chat_widget.handle_key_event(KeyCode::Enter.into());
-    assert!(matches!(
-        rx.try_recv().unwrap(),
-        AppEvent::ConfirmDaemonRestart
-    ));
-    app.confirm_daemon_restart();
-    insta::assert_snapshot!(
-        "daemon_restart_confirmation",
-        render_bottom_popup(&app.chat_widget, /*width*/ 80)
-    );
-    crate::terminal_palette::with_test_default_colors(
-        crate::terminal_probe::DefaultColors {
-            fg: (229, 229, 229),
-            bg: (30, 40, 56),
-        },
-        || {
-            // Simulate a terminal that erased the menu's blank tails with its default
-            // background rather than the cached panel color.
-            use std::io::Write;
-            for y in 0..area.height {
-                write!(terminal.backend_mut(), "\x1b[{};25H\x1b[0m\x1b[K", y + 1).unwrap();
-            }
-            terminal
-                .draw(|frame| app.chat_widget.render(area, frame.buffer_mut()))
-                .unwrap();
-            let expected = crate::custom_terminal::test_support::last_rendered_buffer(&terminal);
-            let screen = terminal.backend().vt100().screen();
-            for y in 0..area.height {
-                for x in 24..96 {
-                    let expected_bg = match expected[(x, y)].bg {
-                        ratatui::style::Color::Rgb(r, g, b) => vt100::Color::Rgb(r, g, b),
-                        ratatui::style::Color::Reset => vt100::Color::Default,
-                        _ => continue,
-                    };
-                    assert_eq!(
-                        screen.cell(y, x).unwrap().bgcolor(),
-                        expected_bg,
-                        "at {x}, {y}: {:?}",
-                        expected[(x, y)]
-                    );
-                }
-            }
-        },
-    );
-    // Cancel is the default; a confirmed restart stays in the TUI.
+    let popup = render_bottom_popup(&app.chat_widget, 100);
+    assert!(popup.contains("Use the official Codex CLI"));
+    assert!(!popup.contains("Install latest"));
+    assert!(!popup.contains("Use this CLI build"));
+    assert!(!popup.contains("Restart background server"));
     app.chat_widget.handle_key_event(KeyCode::Enter.into());
     assert!(rx.try_recv().is_err());
-    app.confirm_daemon_restart();
-    app.chat_widget.handle_key_event(KeyCode::Down.into());
-    app.chat_widget.handle_key_event(KeyCode::Enter.into());
-    assert!(matches!(rx.try_recv().unwrap(), AppEvent::RunDaemonRestart));
-
-    // A local socket alone does not mean Codex can restart its owner.
-    app.chat_widget
-        .remote_connection
-        .as_mut()
-        .unwrap()
-        .is_managed_daemon = false;
-    app.open_daemon_menu();
-    insta::assert_snapshot!(
-        "daemon_unmanaged",
-        render_bottom_popup(&app.chat_widget, /*width*/ 80)
-    );
-    app.chat_widget.handle_key_event(KeyCode::Down.into());
-    app.chat_widget.handle_key_event(KeyCode::Down.into());
-    app.chat_widget.handle_key_event(KeyCode::Enter.into());
-    assert!(matches!(
-        rx.try_recv().unwrap(),
-        AppEvent::ConfirmDaemonUpdate(_)
-    ));
-    app.confirm_daemon_restart();
-    assert!(rx.try_recv().is_err());
-
-    // Maintenance remains available when startup selects the embedded server.
-    app.app_server_target = AppServerTarget::Embedded;
-    app.chat_widget.remote_connection = None;
-    app.daemon_cli_executable = executable;
     for source in [
-        DaemonUpdateSource::PublicStable,
         DaemonUpdateSource::ThisCli,
+        DaemonUpdateSource::PublicStable,
     ] {
-        app.open_daemon_menu();
-        if source == DaemonUpdateSource::PublicStable {
-            insta::assert_snapshot!(
-                "daemon_disconnected",
-                render_bottom_popup(&app.chat_widget, /*width*/ 80)
-            );
-        } else {
-            app.chat_widget.handle_key_event(KeyCode::Down.into());
+        app.confirm_daemon_update(source);
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(
+                event,
+                AppEvent::ConfirmDaemonUpdate(_) | AppEvent::RunDaemonUpdate(_)
+            ));
         }
-        assert!(rx.try_recv().is_err());
-        app.chat_widget.handle_key_event(KeyCode::Enter.into());
-        assert!(
-            matches!(rx.try_recv().unwrap(), AppEvent::ConfirmDaemonUpdate(selected) if selected == source)
-        );
-        app.confirm_daemon_update(source);
-        app.chat_widget.handle_key_event(KeyCode::Enter.into());
-        assert!(rx.try_recv().is_err());
         assert_eq!(app.pending_update_action, None);
-        app.confirm_daemon_update(source);
-        app.chat_widget.handle_key_event(KeyCode::Down.into());
-        app.chat_widget.handle_key_event(KeyCode::Enter.into());
-        assert!(
-            matches!(rx.try_recv().unwrap(), AppEvent::RunDaemonUpdate(selected) if selected == source)
-        );
     }
-
-    std::fs::remove_file(package.path().join("codex-package.json")).unwrap();
-    // The full CLI can have any filename; capability comes from its entry point.
-    app.daemon_cli_executable =
-        Some(AbsolutePathBuf::from_absolute_path(package.path().join("bin/codex-tui")).unwrap());
-    app.open_daemon_menu();
-    insta::assert_snapshot!(
-        "daemon_unpackaged_cli",
-        render_bottom_popup(&app.chat_widget, /*width*/ 80)
-    );
-    app.chat_widget.handle_key_event(KeyCode::Enter.into());
-    assert!(matches!(
-        rx.try_recv().unwrap(),
-        AppEvent::ConfirmDaemonUpdate(DaemonUpdateSource::PublicStable)
-    ));
-
-    app.daemon_cli_executable = None;
-    app.open_daemon_menu();
-    insta::assert_snapshot!(
-        "daemon_no_cli_handoff",
-        render_bottom_popup(&app.chat_widget, /*width*/ 80)
-    );
-    app.chat_widget.handle_key_event(KeyCode::Enter.into());
-    assert!(rx.try_recv().is_err());
 }
 
 #[tokio::test]
-async fn unavailable_daemon_menu_offers_guidance_without_update_actions() {
+async fn client_only_unavailable_daemon_menu_offers_guidance_without_update_actions() {
     let mut app = make_test_app().await;
-    app.daemon_cli_executable =
-        Some(AbsolutePathBuf::from_absolute_path(std::env::current_exe().unwrap()).unwrap());
-    let (chat, _, mut rx, _) = make_chatwidget_manual_with_sender().await;
-    app.chat_widget = chat;
-    app.app_server_target = AppServerTarget::Remote {
-        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
-            websocket_url: "ws://example.test:1234".into(),
-            auth_token: None,
-        },
-    };
-    app.chat_widget.remote_connection = Some(RemoteConnectionStatus {
-        address: "ws://example.test:1234".into(),
-        version: "v0.153.0".into(),
-        is_local_daemon: false,
-        is_managed_daemon: false,
-    });
+    app.chat_widget.remote_connection = None;
     app.open_daemon_menu();
-    insta::assert_snapshot!(
-        "daemon_remote_guidance",
-        render_bottom_popup(&app.chat_widget, /*width*/ 80)
-    );
-    app.chat_widget.handle_key_event(KeyCode::Enter.into());
-    assert!(rx.try_recv().is_err());
+    let popup = render_bottom_popup(&app.chat_widget, 100);
+    assert!(popup.contains("Not connected"));
+    assert!(popup.contains("cannot manage the daemon"));
     assert_eq!(app.pending_update_action, None);
+}
+
+#[tokio::test]
+async fn client_only_direct_daemon_events_cannot_exit_or_update() -> Result<()> {
+    let mut app = make_test_app().await;
+    let client = crate::tests::start_test_embedded_app_server(app.config.clone()).await?;
+    let mut session = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        codex_app_server_client::AppServerClient::InProcess(client),
+        crate::app_server_session::ThreadParamsMode::Embedded,
+    );
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    for event in [
+        AppEvent::ConfirmDaemonUpdate(DaemonUpdateSource::ThisCli),
+        AppEvent::RunDaemonUpdate(DaemonUpdateSource::PublicStable),
+        AppEvent::ConfirmDaemonRestart,
+        AppEvent::RunDaemonRestart,
+    ] {
+        assert!(matches!(
+            app.handle_event(&mut tui, &mut session, event).await?,
+            AppRunControl::Continue
+        ));
+        assert_eq!(app.pending_update_action, None);
+        assert!(app.daemon_restart.is_none());
+    }
+    session.shutdown().await?;
+    Ok(())
 }

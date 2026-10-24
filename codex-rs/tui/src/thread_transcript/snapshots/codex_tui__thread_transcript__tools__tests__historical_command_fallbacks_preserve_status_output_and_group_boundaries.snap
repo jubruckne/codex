@@ -10,18 +10,10 @@ Declined
   last line
 
 opaque command
-$ C:\Program Files\Git\bin\bash.exe -lc "echo hi"
-Completed · exit 0
-  first line
-    indented output
-  last line
+• Ran C:\Program Files\Git\bin\bash.exe -lc "echo hi"
 
 UNC command
-$ \\server\share\tool.exe -arg
-Completed · exit 0
-  first line
-    indented output
-  last line
+• Ran \\server\share\tool.exe -arg
 
 completed interaction
 $ cargo check

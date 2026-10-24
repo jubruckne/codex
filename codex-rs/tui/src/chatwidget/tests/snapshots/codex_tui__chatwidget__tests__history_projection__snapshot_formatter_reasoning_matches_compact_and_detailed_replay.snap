@@ -1,16 +1,25 @@
 ---
 source: tui/src/chatwidget/tests/history_projection.rs
-assertion_line: 176
 expression: "snapshots.join(\"\\n\")"
 ---
 Hidden
-compact: []
+compact: [Line::from_iter([Span::from("• ").dim(), Span::from("Plan").bold().dim().italic()]), Line::from("  "), Line::from_iter([Span::from("  "), Span::from("Read ").dim().italic(), Span::from("src/main.rs").dim().italic(), Span::from(" (").dim().italic(), Span::from("src/main.rs:3").fg(Color::Reset).dim().italic().underlined(), Span::from(")").dim().italic(), Span::from(".").dim().italic()]), Line::from("  "), Line::from_iter([Span::from("  "), Span::from("Checking tests").bold().dim().italic()]), Line::from_iter([Span::from("  "), Span::from("<!-- -->").dim().italic()])]
 detailed:
-• Read src/main.rs (src/main.rs:3).
+• Plan
+  
+  Read src/main.rs (src/main.rs:3).
+  
+  Checking tests
+  <!-- -->
 
 Visible
-compact: []
+compact: [Line::from_iter([Span::from("• ").dim(), Span::from("Plan").bold().dim().italic()]), Line::from("  "), Line::from_iter([Span::from("  "), Span::from("Read ").dim().italic(), Span::from("src/main.rs").dim().italic(), Span::from(" (").dim().italic(), Span::from("src/main.rs:3").fg(Color::Reset).dim().italic().underlined(), Span::from(")").dim().italic(), Span::from(".").dim().italic()]), Line::from("  "), Line::from_iter([Span::from("  "), Span::from("Checking tests").bold().dim().italic()]), Line::from_iter([Span::from("  "), Span::from("<!-- -->").dim().italic()]), Line::from("  "), Line::from_iter([Span::from("  "), Span::from("Raw detail.").dim().italic()])]
 detailed:
-• Read src/main.rs (src/main.rs:3).
+• Plan
+  
+  Read src/main.rs (src/main.rs:3).
+  
+  Checking tests
+  <!-- -->
   
   Raw detail.

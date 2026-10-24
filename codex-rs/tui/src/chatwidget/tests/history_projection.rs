@@ -203,12 +203,8 @@ async fn snapshot_formatter_reasoning_matches_compact_and_detailed_replay() {
         chat.replay_thread_item(item.clone(), "turn".to_string(), ReplayKind::ThreadSnapshot);
         let replayed = take_history_cells(&mut rx);
         assert_eq!((projected.len(), replayed.len()), (1, 1));
-        assert!(
-            projected[0]
-                .display_hyperlink_lines(/*width*/ 80)
-                .is_empty()
-        );
-        assert!(replayed[0].display_hyperlink_lines(/*width*/ 80).is_empty());
+        assert!(!projected[0].display_hyperlink_lines(80).is_empty());
+        assert!(!replayed[0].display_hyperlink_lines(80).is_empty());
         for width in [28, 80] {
             assert_eq!(
                 projected[0].transcript_hyperlink_lines(width),
@@ -384,4 +380,131 @@ fn take_history_cells(
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn native_command_live_completion_and_replay_preserve_source() {
+    for owned in [false, true] {
+        let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+        chat.local_settings.transcript_mode = if owned {
+            crate::transcript_mode::TranscriptMode::Owned
+        } else {
+            crate::transcript_mode::TranscriptMode::Terminal
+        };
+        drain_insert_history(&mut rx);
+        let script = "mkdir -p 'a b'\npython3 - <<'CODE'\n    print('hello')\n\nCODE\necho done";
+        let command = codex_shell_command::parse_command::shlex_join(&[
+            "/bin/zsh".into(),
+            "-lc".into(),
+            script.into(),
+        ]);
+        let mut item = AppServerThreadItem::CommandExecution {
+            id: "native-call".into(),
+            plugin_id: None,
+            script_path: None,
+            model_context: None,
+            sandbox_type: None,
+            command,
+            cwd: chat.config.cwd.clone().into(),
+            process_id: None,
+            source: ExecCommandSource::Agent,
+            status: AppServerCommandExecutionStatus::InProgress,
+            command_actions: vec![],
+            aggregated_output: None,
+            exit_code: None,
+            duration_ms: None,
+        };
+        handle_turn_started(&mut chat, "native-turn");
+        chat.handle_command_execution_started_now(item.clone());
+        chat.on_exec_command_output_delta("native-call", "first output\nlast output");
+        let active = chat.transcript.active_cell.as_ref().unwrap();
+        let live = active
+            .display_lines(120)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(live.contains("last output"));
+        if !owned {
+            assert!(live.contains("    print('hello')"));
+        }
+        if let AppServerThreadItem::CommandExecution {
+            status,
+            aggregated_output,
+            exit_code,
+            duration_ms,
+            ..
+        } = &mut item
+        {
+            *status = AppServerCommandExecutionStatus::Completed;
+            *aggregated_output = Some("first output\nlast output".into());
+            *exit_code = Some(0);
+            *duration_ms = Some(200);
+        }
+        let mut replay = item.clone();
+        if let AppServerThreadItem::CommandExecution { command, .. } = &mut replay {
+            *command = script.into(); // noncanonical source must survive paginated restore too
+        }
+        if owned {
+            let mut user_shell = replay.clone();
+            if let AppServerThreadItem::CommandExecution { source, .. } = &mut user_shell {
+                *source = ExecCommandSource::UserShell;
+            }
+            let user_cells =
+                crate::thread_transcript::thread_items_to_transcript_cells_with_native_commands(
+                    None,
+                    &chat.config.cwd,
+                    [user_shell],
+                    RawReasoningVisibility::Hidden,
+                    Some(&chat.config),
+                    false,
+                );
+            assert!(user_cells[0].display_lines(120).iter().any(|line| {
+                line.to_string().contains("last output")
+            }));
+        }
+        let projected =
+            crate::thread_transcript::thread_items_to_transcript_cells_with_native_commands(
+                None,
+                &chat.config.cwd,
+                [replay],
+                RawReasoningVisibility::Hidden,
+                Some(&chat.config),
+                !owned,
+            );
+        assert!(projected[0].as_any().is::<crate::exec_cell::ExecCell>());
+        let restored = projected[0]
+            .display_lines(120)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!restored.contains("last output"));
+        assert!(restored.contains("    print('hello')"));
+        assert!(
+            projected[0]
+                .transcript_lines(120)
+                .iter()
+                .any(|line| line.to_string().contains("last output"))
+        );
+        chat.handle_command_execution_completed_now(item.clone());
+        chat.flush_active_cell();
+        let cells = take_history_cells(&mut rx);
+        let cell = cells
+            .iter()
+            .find(|cell| cell.as_any().is::<crate::exec_cell::ExecCell>())
+            .unwrap();
+        let visible = cell
+            .display_lines(120)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!visible.contains("last output"));
+        assert!(
+            cell.transcript_lines(120)
+                .iter()
+                .any(|line| line.to_string().contains("last output"))
+        );
+    }
 }

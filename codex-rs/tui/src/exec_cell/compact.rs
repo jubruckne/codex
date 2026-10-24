@@ -1,7 +1,8 @@
 //! Owned-transcript command previews with full command/output retained for local disclosure.
 
+use super::model::ExecCall;
 use super::model::ExecCell;
-use crate::exec_command::strip_bash_lc_and_escape;
+use super::native::command_highlights;
 use crate::history_cell::ActivityDisclosure;
 use crate::history_cell::HistoryRenderMode;
 use crate::history_cell::activity_preview::DETAIL_PREVIEW_LINES;
@@ -9,14 +10,58 @@ use crate::history_cell::activity_preview::clipped_line;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
-use crate::render::highlight::highlight_bash_to_lines;
 use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::terminal_hyperlinks::adaptive_wrap_hyperlink_lines;
+use crate::terminal_hyperlinks::plain_hyperlink_lines;
+use crate::wrapping::RtOptions;
 use codex_ansi_escape::ansi_escape_line;
+use codex_utils_elapsed::format_duration;
 use ratatui::style::Modifier;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 
 impl ExecCell {
+    pub(super) fn suppress_completed_output(call: &ExecCall) -> bool {
+        call.duration.is_some()
+            && !call.is_user_shell_command()
+            && !call.is_unified_exec_interaction()
+    }
+
+    pub(super) fn command_failed(&self, call: &ExecCall) -> bool {
+        self.reported_exit_codes
+            .get(&call.call_id)
+            .copied()
+            .flatten()
+            .or_else(|| call.output.as_ref().map(|output| output.exit_code))
+            .is_some_and(|code| code != 0)
+    }
+
+    pub(super) fn append_command_metadata(&self, call: &ExecCall, lines: &mut [Line<'static>]) {
+        if call.duration.is_none()
+            || call.is_unified_exec_interaction()
+            || call.is_user_shell_command()
+        {
+            return;
+        }
+        let Some(last) = lines.last_mut() else {
+            return;
+        };
+        if self.command_failed(call) {
+            let exit_code = self
+                .reported_exit_codes
+                .get(&call.call_id)
+                .copied()
+                .unwrap_or_else(|| call.output.as_ref().map(|output| output.exit_code));
+            last.push_span(match exit_code {
+                Some(code) => format!(" (exit {code})").red(),
+                None => " (failed)".red(),
+            });
+        }
+        if let Some(duration) = call.duration.filter(|duration| duration.as_secs() >= 10) {
+            last.push_span(format!(" · {}", format_duration(duration)).dim());
+        }
+    }
+
     pub(super) fn command_disclosure(&self, width: u16) -> Option<ActivityDisclosure> {
         let [call] = self.group.calls.as_slice() else {
             return None;
@@ -26,6 +71,9 @@ impl ExecCell {
             && let Some(output) = &call.output
         {
             let retained = output.line_counts().1;
+            if Self::suppress_completed_output(call) && retained > 0 {
+                return Some(ActivityDisclosure::OutputLines(retained));
+            }
             let clipped = output
                 .lines()
                 .rev()
@@ -42,15 +90,6 @@ impl ExecCell {
             .details
             .lines_after(/*after_calls*/ 1, width, HistoryRenderMode::Rich)
             .is_empty()
-        {
-            return Some(ActivityDisclosure::Generic);
-        }
-        let script = strip_bash_lc_and_escape(&call.command);
-        if script.lines().nth(/*n*/ 1).is_some()
-            || self
-                .compact_command_lines(u16::MAX)
-                .first()
-                .is_some_and(|header| header.width() > usize::from(width))
         {
             return Some(ActivityDisclosure::Generic);
         }
@@ -77,9 +116,8 @@ impl ExecCell {
         {
             return Vec::new();
         }
-        let nonzero_exit = call.output.as_ref().filter(|output| output.exit_code != 0);
-        let marker = if nonzero_exit.is_some() {
-            "•".bold()
+        let marker = if self.command_failed(call) {
+            "•".red().bold()
         } else if self.is_active() {
             activity_indicator(
                 call.start_time,
@@ -90,26 +128,30 @@ impl ExecCell {
         } else {
             "•".green().bold()
         };
-        let title = if let Some(output) = nonzero_exit {
-            format!("Exited (status {})", output.exit_code)
-        } else if self.is_active() {
+        let title = if self.is_active() {
             "Running".to_owned()
         } else if call.is_unified_exec_interaction() {
             "Background output".to_owned()
         } else {
             "Ran".to_owned()
         };
-        let script = strip_bash_lc_and_escape(&call.command);
-        // Highlight before clipping so the compact row keeps the same shell token colors.
-        let mut command_lines = highlight_bash_to_lines(&script).into_iter();
-        let mut header = command_lines.next().unwrap_or_default();
-        header
-            .spans
-            .splice(0..0, [marker, " ".into(), title.bold(), " ".into()]);
-        if command_lines.next().is_some() {
-            header.push_span(" …");
+        let script = self.original_command(call);
+        let mut command_lines = command_highlights(&script);
+        self.append_command_metadata(call, &mut command_lines);
+        let mut lines = adaptive_wrap_hyperlink_lines(
+            &plain_hyperlink_lines(command_lines),
+            RtOptions::new(usize::from(width).max(1))
+                .initial_indent(Line::from(vec![
+                    marker,
+                    " ".into(),
+                    title.bold(),
+                    " ".into(),
+                ]))
+                .subsequent_indent("  │ ".dim().into()),
+        );
+        if Self::suppress_completed_output(call) {
+            return lines;
         }
-        let mut lines = vec![clipped_line(header, width)];
         if let Some(output) = &call.output {
             let tail: Vec<_> = output.lines().rev().take(DETAIL_PREVIEW_LINES).collect();
             for (index, raw) in tail.into_iter().rev().enumerate() {

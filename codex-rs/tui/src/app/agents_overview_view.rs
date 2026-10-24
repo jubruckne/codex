@@ -146,6 +146,7 @@ pub(super) struct AgentsOverviewViewState {
     scroll: usize,
     page_height: usize,
     status_filter: usize,
+    pub(super) current_tree: bool,
     help: bool,
     pub(super) input: TextArea,
     pub(super) vim_enabled: bool,
@@ -162,6 +163,7 @@ pub(super) struct AgentsOverviewViewState {
     search: String,
     searching: bool,
     pub(super) grouping: AgentsOverviewGrouping,
+    pub(super) animation_started_at: Option<std::time::Instant>,
     pub(super) rename_target: Option<ThreadId>,
     // The picker can finish this retained view when it selects the already active session.
     pub(super) completion: Option<ViewCompletion>,
@@ -187,6 +189,12 @@ pub(super) struct AgentsOverviewView {
     use_theme_colors: bool,
     pub(super) rows: Vec<AgentsOverviewRow>,
     project_groups: Vec<AgentsOverviewProjectGroup>,
+    parents: Vec<Option<usize>>,
+    pub(super) current_tree: bool,
+    pub(super) expanded_root: Option<ThreadId>,
+    pub(super) frame_requester: Option<crate::tui::FrameRequester>,
+    pub(super) animations_enabled: bool,
+    pub(super) started_at: std::time::Instant,
     pub(super) pinned_thread_ranks: Option<HashMap<ThreadId, usize>>,
     pub(super) pin_action_pending: bool,
     selected: usize,
@@ -211,21 +219,23 @@ impl AgentsOverviewView {
     ) -> Self {
         {
             let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            // The caller supplies recency order. Keep existing rows in place, and append
-            // new arrivals or status transitions in that order within their new group.
-            rows.sort_by_key(|row| {
-                let rank = state
-                    .row_order
-                    .get(&row.thread_id)
-                    .filter(|(group, _)| *group == row.group)
-                    .map_or(usize::MAX, |(_, rank)| *rank);
-                (row.group, rank)
-            });
-            state.row_order = rows
-                .iter()
-                .enumerate()
-                .map(|(rank, row)| (row.thread_id, (row.group, rank)))
-                .collect();
+            // Preserve the caller's root/child order in the current tree. The dashboard
+            // keeps existing rows stable as progress and recency change.
+            if !state.current_tree {
+                rows.sort_by_key(|row| {
+                    let rank = state
+                        .row_order
+                        .get(&row.thread_id)
+                        .filter(|(group, _)| *group == row.group)
+                        .map_or(usize::MAX, |(_, rank)| *rank);
+                    (row.group, rank)
+                });
+                state.row_order = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, row)| (row.thread_id, (row.group, rank)))
+                    .collect();
+            }
         }
         let selected = state
             .lock()
@@ -240,6 +250,20 @@ impl AgentsOverviewView {
         let project_groups = rows
             .iter()
             .map(|row| AgentsOverviewProjectGroup::for_thread(&row.thread, worktrees_enabled))
+            .collect();
+        let indices: HashMap<_, _> = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.thread.id.as_str(), index))
+            .collect();
+        let parents = rows
+            .iter()
+            .map(|row| {
+                row.thread
+                    .parent_thread_id
+                    .as_deref()
+                    .and_then(|id| indices.get(id).copied())
+            })
             .collect();
         let center_shortcut_keys = crate::keymap::keymap_action_ids()
             .filter(|action| matches!(action.context, KeymapContext::List | KeymapContext::Agents))
@@ -272,11 +296,18 @@ impl AgentsOverviewView {
                 }
             }
         }
+        let current_tree = state.lock().unwrap_or_else(PoisonError::into_inner).current_tree;
         let mut view = Self {
             editor_keymap: keymap.clone(),
             use_theme_colors,
             rows,
             project_groups,
+            parents,
+            current_tree,
+            expanded_root: None,
+            frame_requester: None,
+            animations_enabled: false,
+            started_at: std::time::Instant::now(),
             pinned_thread_ranks: None,
             pin_action_pending: false,
             selected,
@@ -310,6 +341,30 @@ impl AgentsOverviewView {
             .chain(visible[..position].iter().rev())
             .map(|index| self.rows[*index].thread_id)
             .find(|id| !removed.contains(id))
+    }
+
+    pub(super) fn root_index(&self, mut index: usize) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        while seen.insert(index) {
+            let Some(parent) = self.parents[index] else {
+                break;
+            };
+            index = parent;
+        }
+        index
+    }
+
+    fn hierarchy_depth(&self, mut index: usize) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        let mut depth = 0;
+        while seen.insert(index) {
+            let Some(parent) = self.parents[index] else {
+                break;
+            };
+            index = parent;
+            depth += 1;
+        }
+        depth
     }
 
     fn title_style(&self, thread_id: ThreadId) -> Style {
@@ -359,7 +414,7 @@ impl AgentsOverviewView {
     }
 
     fn activate(&mut self) {
-        if self.selected == usize::MAX && self.state().has_more {
+        if !self.current_tree && self.selected == usize::MAX && self.state().has_more {
             if !self.state().loading {
                 self.state().loading = true;
                 self.app_event_tx.send(AppEvent::ShowMoreAgentsOverview);
@@ -409,6 +464,20 @@ impl AgentsOverviewView {
                 .unwrap_or(usize::MAX);
         }
         true
+    }
+
+    fn tree_status(row: &AgentsOverviewRow) -> (&'static str, Span<'static>) {
+        match row.group {
+            AgentsOverviewGroup::NeedsYou if row.thread.status == ThreadStatus::SystemError => {
+                ("Error", "!".red())
+            }
+            AgentsOverviewGroup::NeedsYou => ("Needs input", "!".yellow()),
+            AgentsOverviewGroup::Working => ("Working", "◌".into()),
+            AgentsOverviewGroup::Ready if row.details.completed => ("Completed", "✓".dim()),
+            AgentsOverviewGroup::Ready => ("Idle", "○".into()),
+            AgentsOverviewGroup::Finished if row.details.completed => ("Completed", "✓".dim()),
+            AgentsOverviewGroup::Finished => ("Inactive", "○".dim()),
+        }
     }
 
     fn status(row: &AgentsOverviewRow) -> (&'static str, Span<'static>) {
@@ -641,7 +710,7 @@ impl BottomPaneView for AgentsOverviewView {
             return;
         }
 
-        if self.agents_keymap.search.is_pressed(key) {
+        if !self.current_tree && self.agents_keymap.search.is_pressed(key) {
             let mut state = self.state();
             if state.rename_target.is_none() {
                 state.searching = !state.searching;
@@ -652,9 +721,7 @@ impl BottomPaneView for AgentsOverviewView {
             return;
         }
 
-        if (self.state().connection_notice.is_some()
-            || self.state().creating_worktree
-            || self.state().removal.is_some())
+        if (self.state().connection_notice.is_some() || self.state().creating_worktree || self.state().removal.is_some())
             && self.keymap.action_for(key) != Some(ListAction::Cancel)
         {
             match self.keymap.action_for(key) {
@@ -678,7 +745,7 @@ impl BottomPaneView for AgentsOverviewView {
             self.app_event_tx.send(AppEvent::OpenResumePicker);
             return;
         }
-        if self.agents_keymap.toggle_grouping.is_pressed(key) {
+        if !self.current_tree && self.agents_keymap.toggle_grouping.is_pressed(key) {
             let mut state = self.state();
             state.grouping = match state.grouping {
                 AgentsOverviewGrouping::Project => AgentsOverviewGrouping::Status,

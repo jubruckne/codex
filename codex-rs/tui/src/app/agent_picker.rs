@@ -114,7 +114,7 @@ impl App {
         else {
             return;
         };
-        if self.primary_thread_id != Some(root) {
+        if self.primary_thread_id != Some(root) && self.agents_overview_root_id() != Some(root) {
             return;
         }
         let refresh = match result {
@@ -130,6 +130,19 @@ impl App {
         };
         let selected_thread_id = self.selected_agent_picker_thread_id();
         for thread in refresh.threads {
+            if let Ok(id) = ThreadId::from_string(&thread.id)
+                && !self.agents_overview.removed_threads.contains(&id)
+            {
+                self.agents_overview
+                    .threads
+                    .entry(id)
+                    .and_modify(|cached| {
+                        if cached.is_none() {
+                            *cached = Some(thread.clone());
+                        }
+                    })
+                    .or_insert_with(|| Some(thread.clone()));
+            }
             let Ok(thread_id) = ThreadId::from_string(&thread.id) else {
                 continue;
             };
@@ -143,6 +156,8 @@ impl App {
                 .thread_event_channels
                 .get(&thread_id)
                 .is_some_and(|channel| channel.attachment() == ThreadEventAttachment::Live);
+            self.agent_navigation
+                .note_updated_at(thread_id, thread.updated_at.saturating_mul(1000));
             let previous = self.agent_navigation.get(&thread_id);
             let is_running = matches!(thread.status, ThreadStatus::Active { .. });
             let update_liveness = previous.is_none() || !is_running;
@@ -168,6 +183,7 @@ impl App {
         }
         for thread_id in refresh.archived_thread_ids {
             if !completion.visibility_changed_threads.contains(&thread_id) {
+                self.remove_agents_overview_thread(thread_id);
                 self.update_agent_picker_thread_visibility(
                     thread_id,
                     AgentPickerThreadVisibility::Hidden,
@@ -176,7 +192,9 @@ impl App {
         }
         self.agent_navigation.prune_untracked_picker_exclusions();
 
+        self.sync_active_agent_label();
         self.replace_agent_picker_view(selected_thread_id);
+        self.repaint_agents_overview();
         if completion.follow_up_requested {
             self.refresh_agent_picker_threads(app_server, root);
         }
@@ -189,7 +207,9 @@ impl App {
     ) {
         let selected_thread_id = self.selected_agent_picker_thread_id();
         self.update_agent_picker_thread_visibility(thread_id, visibility);
+        self.sync_active_agent_label();
         self.replace_agent_picker_view(selected_thread_id);
+        self.repaint_agents_overview();
     }
 
     fn update_agent_picker_thread_visibility(

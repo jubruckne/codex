@@ -13,6 +13,9 @@ pub(super) async fn run_main_inner(
     loader_overrides: LoaderOverrides,
     mut explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
 ) -> std::io::Result<AppExitInfo> {
+    crate::client_only::validate_launch(&cli, explicit_remote_endpoint.as_ref())?;
+    let official_home = find_codex_home()?;
+    let official_socket = crate::client_only::discover(official_home.as_path()).await?;
     if cli.no_daemon && explicit_remote_endpoint.is_some() {
         return Err(std::io::Error::other(
             "--no-daemon cannot be used with --remote.",
@@ -23,18 +26,7 @@ pub(super) async fn run_main_inner(
             "--add-dir is not supported with --remote. Configure additional workspace roots on the server.",
         ));
     }
-    #[cfg(windows)]
-    let elevated_warning = if explicit_remote_endpoint.is_none()
-        && !cli.no_daemon
-        && !cli.agents_overview
-        && codex_app_server_daemon::is_elevated().map_err(std::io::Error::other)?
-    {
-        cli.no_daemon = true;
-        Some(daemon_startup::ELEVATED_LAUNCH_WARNING)
-    } else {
-        None
-    };
-    #[cfg(not(windows))]
+    // The supported socket transport retains its Windows peer/elevation checks.
     let elevated_warning: Option<&str> = None;
     let strict_config = cli.strict_config;
     if cli.shared.worktree {
@@ -146,8 +138,8 @@ pub(super) async fn run_main_inner(
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         let validation_target = app_server_target_for_launch(
             explicit_remote_endpoint.clone(),
-            explicit_local_daemon_socket.clone(),
-            /*can_reuse_implicit_local_daemon*/ false,
+            Some(official_socket.clone()),
+            /*can_reuse_implicit_local_daemon*/ true,
             workload_identity_selected,
             std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
         )?;
@@ -213,7 +205,7 @@ pub(super) async fn run_main_inner(
         .await;
     }
 
-    let mut daemon_exclusion = daemon_startup::exclusion(
+    let daemon_exclusion = daemon_startup::exclusion(
         &cli,
         &cli_kv_overrides,
         &launch_loader_overrides,
@@ -255,7 +247,7 @@ pub(super) async fn run_main_inner(
     // remote selection and the environment without opening a server connection.
     let presentation_target = app_server_target_for_launch(
         explicit_remote_endpoint.clone(),
-        explicit_local_daemon_socket.clone(),
+        Some(official_socket.clone()),
         reuse_implicit_local_daemon,
         workload_identity_selected,
         std::env::var_os(codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR).as_deref(),
@@ -346,7 +338,7 @@ pub(super) async fn run_main_inner(
     } else {
         explicit_local_daemon_socket
     };
-    let mut app_server_target = app_server_target_for_launch(
+    let app_server_target = app_server_target_for_launch(
         explicit_remote_endpoint,
         default_daemon,
         reuse_implicit_local_daemon,
@@ -545,77 +537,8 @@ pub(super) async fn run_main_inner(
     } else {
         None
     };
-    let auto_start_daemon = config.features.enabled(Feature::DaemonAutoStart)
-        && implicit_connection
-        && !cli.agents_overview
-        && !cli.no_daemon
-        && !app_server_target.uses_remote_workspace();
-    if auto_start_daemon
-        && daemon_exclusion.is_none()
-        && should_show_bedrock_setup_wizard(
-            LoginStatus::NotAuthenticated,
-            config.model_provider.requires_openai_auth,
-            &config,
-            &AppServerTarget::Embedded,
-        )
-        && startup_draft
-            .run_until(
-                config
-                    .auth_config()
-                    .load_auth(/*enable_codex_api_key_env*/ false),
-            )
-            .await?
-            .ok()
-            .flatten()
-            .is_none()
-    {
-        // The Bedrock wizard configures its provider through the embedded server.
-        daemon_exclusion = Some("Bedrock sign-in");
-        app_server_target = AppServerTarget::Embedded;
-    }
-    if auto_start_daemon
-        && daemon_exclusion.is_none()
-        && matches!(&app_server_target, AppServerTarget::Embedded)
-        && daemon_startup::uses_wsl_drvfs(&codex_home)
-    {
-        daemon_exclusion = Some(daemon_startup::WSL_DRVFS_EXCLUSION);
-    }
-    let mut managed_daemon = cli.managed_daemon;
-    if auto_start_daemon && daemon_exclusion.is_none() {
-        let output = startup_draft
-            .run_until(async {
-                // Daemon startup needs no terminal input. Keep the composer visible and
-                // responsive while it checks the running server or prepares an installation.
-                // Preserve saved daemon settings until any mismatch is confirmed in recovery.
-                let result =
-                    codex_app_server_daemon::start_with_features(&Default::default()).await;
-                daemon_telemetry::record_start(&config, &result).await;
-                match result {
-                    Ok(output) => Ok(Some(output)),
-                    #[cfg(windows)]
-                    Err(err) if err.is::<codex_app_server_daemon::DetachedLaunchRestricted>() => {
-                        Ok(None)
-                    }
-                    Err(err) => Err(std::io::Error::other(format!(
-                        "{err:#}\n{}",
-                        daemon_startup::FAILURE_HINT
-                    ))),
-                }
-            })
-            .await??;
-        if let Some(output) = output {
-            managed_daemon = output.backend.is_some();
-            app_server_target = AppServerTarget::LocalDaemon {
-                endpoint: RemoteAppServerEndpoint::UnixSocket {
-                    socket_path: AbsolutePathBuf::from_absolute_path_checked(output.socket_path)?,
-                },
-                allow_embedded_fallback: false,
-            };
-        } else {
-            app_server_target = AppServerTarget::Embedded;
-            daemon_exclusion = Some("this Windows launcher");
-        }
-    }
+    let auto_start_daemon = false;
+    let managed_daemon = false;
     // The overview must inspect the shared server's agents regardless of local settings.
     let compatibility_warning = if cli.agents_overview {
         None
@@ -629,10 +552,6 @@ pub(super) async fn run_main_inner(
         )
         .await?
     };
-    if compatibility_warning.is_some() {
-        app_server_target = AppServerTarget::Embedded;
-        daemon_exclusion = Some("daemon feature settings");
-    }
     if app_server_target.uses_embedded_network_policy() {
         embedded_network_policy.activate(&mut config);
     }
@@ -662,7 +581,7 @@ pub(super) async fn run_main_inner(
             .map_err(std::io::Error::other)?,
     );
 
-    remove_legacy_tui_log_file(config.codex_home.as_path());
+    // The official installation owns cleanup of shared logs and metadata.
 
     let otel_originator = originator().value;
     let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -716,13 +635,7 @@ pub(super) async fn run_main_inner(
         (AppServerTarget::LocalDaemon { .. }, _) => "existing_daemon",
         (AppServerTarget::Embedded, None) => "auto_start_disabled",
     };
-    let daemon_settings = if metrics.is_some() {
-        codex_app_server_daemon::telemetry::settings_tags(&config.codex_home)
-            .await
-            .to_vec()
-    } else {
-        Vec::new()
-    };
+    let daemon_settings: Vec<(&str, &str)> = Vec::new();
     let mut launch_tags = daemon_settings.to_vec();
     launch_tags.extend(terminal_size_tags);
     launch_tags.extend([
@@ -821,26 +734,7 @@ pub(super) async fn run_main_inner(
         }
     }
 
-    if !app_server_target.uses_remote_workspace() && !workload_identity_selected {
-        #[allow(clippy::print_stderr)]
-        if let Err(err) = startup_draft
-            .run_until(enforce_login_restrictions(&config.auth_config()))
-            .await?
-        {
-            restore_terminal_before_fatal_exit();
-            eprintln!("{err}");
-            if let Some(worktree) = managed_worktree.as_ref() {
-                worktree.report_startup_failure();
-            }
-            launch_telemetry.record(&app_server_target, /*connected*/ false);
-            if let Some(otel) = otel {
-                let _ = otel
-                    .shutdown_with_timeout(INTERACTIVE_OTEL_SHUTDOWN_TIMEOUT)
-                    .await;
-            }
-            std::process::exit(1);
-        }
-    }
+    // Authentication and its restrictions are enforced by the official daemon.
 
     let (tui_file_layer, _tui_file_log_guard) = if config_toml_log_dir_configured {
         let log_dir = config.log_dir.clone();

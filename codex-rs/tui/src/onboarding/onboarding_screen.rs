@@ -587,6 +587,7 @@ pub(crate) async fn run_onboarding_app(
     app_server: Option<&mut AppServerSession>,
     tui: &mut Tui,
 ) -> Result<OnboardingResult> {
+    crate::client_only::deny_shared_write().map_err(std::io::Error::other)?;
     let request_handle = args.app_server_request_handle.clone();
     let screen = OnboardingScreen::new(tui, args).await;
     run_onboarding_screen(screen, request_handle, app_server, tui).await

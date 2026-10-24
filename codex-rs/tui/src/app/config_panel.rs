@@ -4,6 +4,7 @@ use super::*;
 use crate::config_panel::ConfigPreference;
 use crate::config_panel::ConfigToggle;
 use crate::config_update::format_config_error;
+use crate::client_only::ProtectedConfigEdits as _;
 
 impl App {
     pub(super) async fn save_config_preference(
@@ -14,7 +15,7 @@ impl App {
         let result =
             ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                 .with_edits([preference.edit()])
-                .apply()
+                .reject_shared_config_write()
                 .await;
         if let Err(error) = result {
             self.chat_widget

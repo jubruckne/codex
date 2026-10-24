@@ -290,6 +290,7 @@ define_runtime_action_bindings! {
         toggle_fast_mode,
         toggle_raw_output,
         toggle_side_conversation,
+        toggle_agent_feed,
     ],
     "chat" => Chat, chat, chat [
         open_presets,

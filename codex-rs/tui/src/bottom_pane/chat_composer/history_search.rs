@@ -2,17 +2,17 @@
 //!
 //! The persistent and local history stores live in `chat_composer_history`, but the composer owns
 //! the active search session because it has to snapshot/restore the editable draft and Vim edit
-//! state, preview matches in the textarea, and render the footer prompt while the footer line is
-//! acting as the search input.
+//! state and preview matches in the textarea. Fullscreen queries use the shared gap above the
+//! composer; inline rendering retains its footer prompt.
 //!
 //! This module is responsible for the UI-facing lifecycle of a search session: recognizing the
-//! keys that enter and drive search mode, keeping the footer query separate from the textarea
+//! keys that enter and drive search mode, keeping the search query separate from the textarea
 //! preview, restoring the saved draft on cancellation, and translating history search results into
 //! composer-visible state. It deliberately does not decide which history entries
 //! match, how duplicate results are skipped, or when persistent history should be fetched; those
 //! traversal invariants stay with `ChatComposerHistory`.
 //!
-//! A search session starts idle with an empty footer query, so opening Ctrl+R never previews the
+//! A search session starts idle with an empty search query, so opening Ctrl+R never previews the
 //! latest history entry by itself. Typing or pasting a query restarts traversal from newest to oldest,
 //! repeated Ctrl+R/Up and Ctrl+S/Down move between unique matches, `Enter` accepts the current
 //! preview as an editable draft, and `Esc` or Ctrl+C restores the saved draft, including background
@@ -87,7 +87,7 @@ impl HistorySearchSession {
 
 /// User-visible phase of the active Ctrl+R search session.
 ///
-/// Search keeps the footer query and composer preview separate: `Idle` shows the frozen fallback
+/// Search keeps the query and composer preview separate: `Idle` shows the frozen fallback
 /// draft, `Searching` waits for persistent history, `Match` previews a found entry, and `NoMatch`
 /// restores the frozen fallback while leaving the search input open for more typing.
 #[derive(Clone, Debug)]
@@ -117,12 +117,12 @@ impl ChatComposer {
         bindings.is_pressed(*key_event)
     }
 
-    /// Opens footer-owned reverse history search without previewing history yet.
+    /// Opens composer-owned reverse history search without previewing history yet.
     ///
     /// Entering search mode first integrates already-classified paste-burst text with
     /// [`Self::apply_paste`], then snapshots the full composer draft, clears any file/search popup
     /// state, and resets history traversal. The first visible match is produced only after the
-    /// footer query becomes non-empty, which keeps Ctrl+R from replacing an empty composer with
+    /// search query becomes non-empty, which keeps Ctrl+R from replacing an empty composer with
     /// the latest prompt before the user has searched for anything.
     pub(super) fn begin_history_search(&mut self) -> (InputResult, bool) {
         if let Some(pasted) = self.draft.paste_burst.flush_before_modified_input() {
@@ -386,7 +386,8 @@ impl ChatComposer {
         self.sparkle.history_preview = previous;
     }
 
-    /// Builds the footer line shown while reverse history search is active.
+    /// Builds the inline footer line shown while reverse history search is active.
+    /// Fullscreen instead uses `history_search_gap_footer` and its gap cursor.
     ///
     /// The footer displays the query as the editable field and uses the status to decide whether
     /// to show searching, match actions, or no-match feedback. Newlines and tabs use visible markers
@@ -417,6 +418,71 @@ impl ChatComposer {
 
     fn history_search_action_key_span(key: KeyCode) -> Span<'static> {
         Span::from(key_hint::plain(key))
+    }
+
+    /// One-row reverse-search editor for the shared gap, with the query tail and caret visible.
+    pub(super) fn history_search_gap_footer(&self, width: u16) -> Option<super::TranscriptFooter> {
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+
+        let search = self.history_search.as_ref()?;
+        if width == 0 {
+            return None;
+        }
+        let status = match search.status {
+            HistorySearchStatus::Idle => "esc cancel",
+            HistorySearchStatus::Searching => "searching · esc cancel",
+            HistorySearchStatus::Match => "enter accept · esc cancel",
+            HistorySearchStatus::NoMatch => "no match · esc cancel",
+        };
+        // Leave the query at least half of the row, even while status text changes.
+        let suffix_budget = usize::from(width / 2);
+        let suffix = [
+            status,
+            match search.status {
+                HistorySearchStatus::Searching => "searching",
+                HistorySearchStatus::NoMatch => "no match",
+                _ => "esc",
+            },
+            "",
+        ]
+        .into_iter()
+        .find(|text| text.width() + 3 <= suffix_budget)
+        .unwrap_or("");
+        let suffix_width = if suffix.is_empty() {
+            0
+        } else {
+            suffix.width() + 3
+        };
+        let editor_width = usize::from(width).saturating_sub(suffix_width);
+        let prefix = ["reverse-i-search: ", "history: ", "? ", ""]
+            .into_iter()
+            .find(|prefix| prefix.width() + 2 <= editor_width)
+            .unwrap_or("");
+        let query = search.display_query();
+        let query_budget = editor_width.saturating_sub(prefix.width() + 1);
+        let mut visible = Vec::new();
+        let mut visible_width = 0;
+        for grapheme in query.graphemes(true).rev() {
+            let columns = grapheme.width();
+            if visible_width + columns > query_budget {
+                break;
+            }
+            visible.push(grapheme);
+            visible_width += columns;
+        }
+        let query_tail = visible.into_iter().rev().collect::<String>();
+        let cursor = (prefix.width() + visible_width).min(usize::from(width - 1)) as u16;
+        let mut line = Line::from(vec![prefix.to_owned().dim(), query_tail.cyan()]);
+        if !suffix.is_empty() {
+            line.push_span(" ".repeat(editor_width.saturating_sub(line.width())).dim());
+            line.push_span(format!(" · {suffix}").dim());
+        }
+        Some(super::TranscriptFooter {
+            text: line.into(),
+            cursor_column: Some(cursor),
+            is_interactive: true,
+        })
     }
 
     /// Returns byte ranges that should be highlighted in the current composer preview.
@@ -488,7 +554,8 @@ impl ChatComposer {
         ranges
     }
 
-    /// Returns the screen cursor position for the footer query when search mode is active.
+    /// Returns the inline footer query cursor when search mode is active.
+    /// Fullscreen bypasses this path and places the packet cursor in the composer gap.
     ///
     /// The cursor tracks the end of the footer query rather than the textarea preview. If the
     /// footer area is collapsed or too narrow, the x coordinate is clamped inside the hint rect so

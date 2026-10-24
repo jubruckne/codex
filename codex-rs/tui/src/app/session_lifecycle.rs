@@ -293,6 +293,8 @@ impl App {
             .await
         {
             Ok(thread) => {
+                self.agent_navigation
+                    .note_updated_at(thread_id, thread.updated_at.saturating_mul(1000));
                 let is_parent_owned = thread_blocks_direct_input(&thread);
                 let agent_path = source_agent_path(&thread.source);
                 let is_running = matches!(
@@ -327,6 +329,7 @@ impl App {
                     self.agent_navigation
                         .set_running(thread_id, /*is_running*/ false);
                 }
+                self.sync_active_agent_label();
                 true
             }
             Err(err) => {
@@ -1256,8 +1259,19 @@ impl App {
             }
         }
 
+        let update_times: HashMap<_, _> = threads
+            .iter()
+            .filter_map(|thread| {
+                ThreadId::from_string(&thread.id)
+                    .ok()
+                    .map(|id| (id, thread.updated_at.saturating_mul(1000)))
+            })
+            .collect();
         let mut refreshed_thread_ids = HashSet::new();
         for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
+            if let Some(updated) = update_times.get(&thread.thread_id) {
+                self.agent_navigation.note_updated_at(thread.thread_id, *updated);
+            }
             let agent_path = thread.agent_path;
             let has_live_channel = self
                 .thread_event_channels

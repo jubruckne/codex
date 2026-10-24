@@ -1,4 +1,5 @@
 use super::*;
+use crate::history_cell::HistoryCell;
 use crate::test_support::PathBufExt;
 use crate::test_support::test_path_buf;
 use crate::thread_transcript::RawReasoningVisibility;
@@ -54,6 +55,45 @@ fn mcp_item(server: &str, id: &str) -> ThreadItem {
         })),
         error: None,
         duration_ms: Some(5),
+    }
+}
+
+#[test]
+fn routine_commands_replay_filters_scrollback_and_retains_exact_transcript() {
+    for exit_code in [0, 2] {
+        let script = "rg -n 'needle' file; sed -n '1,10p' file";
+        let mut item = command_item(if exit_code == 0 {
+            CommandExecutionStatus::Completed
+        } else {
+            CommandExecutionStatus::Failed
+        });
+        if let ThreadItem::CommandExecution {
+            command,
+            aggregated_output,
+            exit_code: code,
+            ..
+        } = &mut item
+        {
+            *command = script.into();
+            *aggregated_output = Some("replayed inspection output".into());
+            *code = Some(exit_code);
+        }
+        let mut cell = CommandHistory::from_native_item(item).unwrap().into_cell();
+        cell.configure_native(true, None, true);
+        let summary = cell.display_lines(160).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        if exit_code == 0 {
+            assert!(summary.contains("Searched") && summary.contains("Read file"));
+            assert!(!summary.contains("1–10"));
+        } else {
+            assert!(summary.contains(script) && summary.contains("exit 2"));
+        }
+        let full = cell
+            .transcript_lines(160)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(full.contains(script) && full.contains("replayed inspection output"));
     }
 }
 
@@ -249,7 +289,16 @@ fn historical_command_fallbacks_preserve_status_output_and_group_boundaries() {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
-        assert_eq!((&detailed, &raw), (&compact, &compact));
+        if matches!(label, "opaque command" | "UNC command") {
+            assert!(cells[1].as_any().is::<ExecCell>());
+            for line in ["first line", "  indented output", "last line"] {
+                assert!(!compact.contains(line));
+                assert!(detailed.contains(line));
+                assert!(raw.contains(line));
+            }
+        } else {
+            assert_eq!((&detailed, &raw), (&compact, &compact));
+        }
         snapshots.push(format!("{label}\n{compact}"));
     }
     insta::assert_snapshot!(snapshots.join("\n\n"));

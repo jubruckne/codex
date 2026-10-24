@@ -120,6 +120,7 @@ pub(crate) struct AppKeymap {
     pub(crate) toggle_raw_output: Vec<KeyBinding>,
     /// Switch between a side conversation and its parent without closing either.
     pub(crate) toggle_side_conversation: Vec<KeyBinding>,
+    pub(crate) toggle_agent_feed: Vec<KeyBinding>,
 }
 
 /// Chat-level keybindings evaluated at the app event layer.
@@ -707,6 +708,10 @@ impl RuntimeKeymap {
             })
             .collect();
 
+        let agent_feed_defaults: Vec<_> = defaults.app.toggle_agent_feed.iter().copied().filter(|binding| {
+            !configured_context_binding_is_used(keymap, *binding)
+                && !chords.bindings.iter().any(|chord| chord.chord.prefix.normalized_parts() == binding.normalized_parts())
+        }).collect();
         let app = AppKeymap {
             open_agents: resolve_bindings(
                 keymap.global.open_agents.as_ref(),
@@ -758,6 +763,11 @@ impl RuntimeKeymap {
                 keymap.global.toggle_raw_output.as_ref(),
                 &defaults.app.toggle_raw_output,
                 "tui.keymap.global.toggle_raw_output",
+            )?,
+            toggle_agent_feed: resolve_bindings(
+                keymap.global.toggle_agent_feed.as_ref(),
+                &agent_feed_defaults,
+                "tui.keymap.global.toggle_agent_feed",
             )?,
             toggle_side_conversation: if side_toggle_default_is_shadowed {
                 Vec::new()
@@ -1464,6 +1474,7 @@ impl RuntimeKeymap {
                 keymap.global.open_external_editor.as_ref(),
                 app.open_external_editor.as_slice(),
             ),
+            (keymap.global.toggle_agent_feed.as_ref(), app.toggle_agent_feed.as_slice()),
             (keymap.global.copy.as_ref(), app.copy.as_slice()),
             (
                 keymap.global.clear_terminal.as_ref(),
@@ -1685,6 +1696,7 @@ impl RuntimeKeymap {
                 toggle_fast_mode: default_bindings![],
                 toggle_raw_output: default_bindings![alt(KeyCode::Char('r'))],
                 toggle_side_conversation: default_bindings![ctrl(KeyCode::Char('/'))],
+                toggle_agent_feed: default_bindings![plain(KeyCode::F(6))],
             },
             chords: Arc::default(),
             chat: ChatKeymap {
@@ -2021,6 +2033,7 @@ impl RuntimeKeymap {
         #[cfg(unix)]
         for (action, bindings) in [
             ("global.open_agents", &self.app.open_agents),
+            ("global.toggle_agent_feed", &self.app.toggle_agent_feed),
             ("chat.open_presets", &self.chat.open_presets),
             ("chat.toggle_voice", &self.chat.toggle_voice),
         ] {
@@ -2064,6 +2077,7 @@ impl RuntimeKeymap {
             ("toggle_fast_mode", self.app.toggle_fast_mode.as_slice()),
             ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
             ("toggle_side_conversation", side_toggle_bindings.as_slice()),
+                ("toggle_agent_feed", self.app.toggle_agent_feed.as_slice()),
             ("chat.open_presets", self.chat.open_presets.as_slice()),
             ("chat.toggle_voice", self.chat.toggle_voice.as_slice()),
             (
@@ -2171,6 +2185,7 @@ impl RuntimeKeymap {
                 ("toggle_fast_mode", self.app.toggle_fast_mode.as_slice()),
                 ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
                 ("toggle_side_conversation", side_toggle_bindings.as_slice()),
+                ("toggle_agent_feed", self.app.toggle_agent_feed.as_slice()),
             ],
             approval_overlay_bindings,
             [(
@@ -2259,6 +2274,7 @@ impl RuntimeKeymap {
                 ("toggle_fast_mode", self.app.toggle_fast_mode.as_slice()),
                 ("toggle_raw_output", self.app.toggle_raw_output.as_slice()),
                 ("toggle_side_conversation", side_toggle_bindings.as_slice()),
+                ("toggle_agent_feed", self.app.toggle_agent_feed.as_slice()),
                 (
                     "composer.history_search_previous",
                     self.composer.history_search_previous.as_slice(),

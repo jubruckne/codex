@@ -213,7 +213,7 @@ impl App {
                 .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
                 .is_none()
             {
-                self.open_agents_overview(app_server);
+                self.reopen_agents_overview(app_server);
             }
             return Err(AppRunControl::Continue);
         }

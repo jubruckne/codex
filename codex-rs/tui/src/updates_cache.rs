@@ -29,6 +29,7 @@ pub(crate) fn read_version_info(version_file: &Path) -> anyhow::Result<VersionIn
 /// Persist a dismissal for the current latest version so we don't show
 /// the update popup again for this version.
 pub(crate) async fn dismiss_version(config: &Config, version: &str) -> anyhow::Result<()> {
+    crate::client_only::deny_shared_write()?;
     let version_file = version_filepath(config);
     let mut info = match read_version_info(&version_file) {
         Ok(info) => info,
@@ -50,3 +51,18 @@ pub(crate) async fn dismiss_version(config: &Config, version: &str) -> anyhow::R
 #[cfg(test)]
 #[path = "updates_cache_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[tokio::test]
+async fn client_only_update_metadata_is_unchanged() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await?;
+    let path = version_filepath(&config);
+    std::fs::write(&path, "official update metadata")?;
+    assert!(dismiss_version(&config, "new-version").await.is_err());
+    assert_eq!(std::fs::read_to_string(path)?, "official update metadata");
+    Ok(())
+}

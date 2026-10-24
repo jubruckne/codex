@@ -1874,6 +1874,7 @@ async fn ignore_same_thread_resume_allows_retrying_read_only_view() -> Result<()
         &app_server,
         thread_id,
         ThreadEventSnapshot {
+            turn_tokens: Default::default(),
             delegated_turns: Vec::new(),
             session: Some(session),
             turns: vec![test_turn("running", TurnStatus::InProgress, Vec::new())],

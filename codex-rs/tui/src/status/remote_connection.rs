@@ -66,7 +66,7 @@ pub(crate) fn server_version_notice_for_tui(
     client: &str,
     server: Option<&str>,
 ) -> Option<String> {
-    if settings.show_server_version_notice {
+    if !crate::client_only::ENABLED && settings.show_server_version_notice {
         server_version_notice(client, server)
     } else {
         None
@@ -285,22 +285,8 @@ mod tests {
             )
             .map(|(notice, _)| notice)
         };
-        let remote_notice =
-            server_version_notice("0.153.0-alpha.10.1", Some("0.153.0-alpha.9.2")).unwrap();
-        assert_eq!(
-            notice(&remote),
-            Some(ServerVersionNotice {
-                message: remote_notice.clone(),
-                offer_update: false,
-            })
-        );
-        assert_eq!(
-            notice(&local),
-            Some(ServerVersionNotice {
-                message: remote_notice,
-                offer_update: true,
-            })
-        );
+        assert_eq!(notice(&remote), None);
+        assert_eq!(notice(&local), None);
         Ok(())
     }
 

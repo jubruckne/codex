@@ -1,16 +1,18 @@
-//! Footer and status-row presentation state for the chat composer.
-//! Owners schedule flash expiry redraws; replacing a draft clears its flash.
-//! One resolved layout supplies the status, input, popup, and hint rectangles to each consumer.
-//! Slash-command and unified mention suggestions preserve passive footer content while keeping input.
-//! Interactive transcript footers keep focus over nonempty composer hints. Their owner projects
-//! actual pending chord hints; unrelated hints resume when the transcript interaction closes.
-//! While the transcript owns input, the composer is dimmed and yields its cursor to the footer.
-//! Hidden suggestions retain their query and selection until their input owner returns.
-//! A pending quit contributes a derived release hint without changing stored footer state.
-//! Warning notices use the passive hint row, including while typing, and yield to input controls.
-//! Only the two base composer modes opt into fresh-thread decoration; queries and help do not.
-//! Shortcut help occupies the space above the composer and keeps its close hint on the final row.
-//! Passive transcript hints retain the shortcuts entry when it fits beside the complete hint.
+//! Composer presentation state shared by inline footers and the fullscreen composer gap.
+//! With `composer_gap`, contextual footer height is zero: the app paints queries, navigation,
+//! warning badges, and feedback in the existing row above input. The configured model/context
+//! status surface stays below the composer; its measurement is independent of contextual modes.
+//! Inline surfaces retain the legacy hint/footer layout and its responsive rendering.
+//!
+//! Query state remains with the original owner: transcript Find belongs to the transcript,
+//! reverse history search to the composer, and Vim search to the draft textarea. Fullscreen
+//! packets project text and cursor columns into the gap without replacing the draft or preview.
+//! Interactive transcript packets preserve input ownership and dim the composer even though
+//! their text no longer reserves a footer row. Hidden suggestions retain their query/selection.
+//! Owners schedule feedback expiry redraws; replacing a draft clears its flash. Warning hitboxes
+//! refer only to badges actually painted by the app. Quit/edit confirmation state and keyboard
+//! actions remain active without fullscreen reminder labels. Explicit shortcut help expands
+//! above the composer and projects its close action into the gap.
 
 use std::time::Instant;
 
@@ -48,7 +50,7 @@ pub(super) struct ComposerLayout {
     pub(super) footer: Rect,
 }
 
-/// Per-frame transcript content; the composer remains the only footer layout owner.
+/// Per-frame interaction presentation. Fullscreen uses the composer gap; inline uses its footer.
 pub(crate) struct TranscriptFooter {
     pub(crate) text: Text<'static>,
     pub(crate) cursor_column: Option<u16>,
@@ -165,13 +167,14 @@ impl super::ChatComposer {
         }
     }
 
-    /// Override the footer hint items displayed beneath the composer. Passing
-    /// `None` restores the default shortcut footer.
+    /// Override contextual hints: fullscreen projects them into the gap; inline uses its footer.
+    /// Passing `None` restores the normal presentation for that surface.
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
         self.footer.hint_override = items;
     }
 
-    /// Show the transient "press again to quit" hint for `key`.
+    /// Retain the transient quit-confirmation state for `key`.
+    /// Inline surfaces display its reminder; fullscreen omits that label.
     ///
     /// The owner (`BottomPane`/`ChatWidget`) is responsible for scheduling a
     /// redraw after [`super::super::QUIT_SHORTCUT_TIMEOUT`] so the hint can disappear
@@ -276,6 +279,10 @@ impl super::ChatComposer {
     }
 
     pub(super) fn footer_hint_height(&self, width: u16, options: ComposerRenderOptions<'_>) -> u16 {
+        // Owned transcripts use their existing gap for every contextual interaction.
+        if options.composer_gap.is_some() {
+            return 0;
+        }
         if self.show_warning_notice(options) || self.shortcuts_above_composer(options) {
             return 1;
         }
@@ -362,7 +369,7 @@ pub(super) struct FooterState {
     pub(super) status_line_hyperlink_url: Option<String>,
     pub(super) status_line_enabled: bool,
     pub(super) side_conversation_context_label: Option<String>,
-    pub(super) active_agent_label: Option<String>,
+    pub(super) active_agent_label: Option<Line<'static>>,
     pub(super) external_editor_key: Option<ShortcutHint>,
     pub(super) show_transcript_key: Option<ShortcutHint>,
     pub(super) show_warnings_key: Option<ShortcutHint>,

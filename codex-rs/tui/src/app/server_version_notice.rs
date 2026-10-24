@@ -44,6 +44,11 @@ impl App {
         client_version: &str,
         server_version: Option<&str>,
     ) {
+        let server_version = if crate::client_only::ENABLED {
+            None
+        } else {
+            server_version
+        };
         self.agents_overview
             .view_state
             .lock()

@@ -11,6 +11,7 @@
 //! rendered transcript output can change.
 
 mod activity_group;
+mod native_tools;
 pub(crate) use activity_group::ActivityGroup;
 
 use crate::diff_model::FileChange;

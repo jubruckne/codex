@@ -1,0 +1,17 @@
+---
+source: tui/src/app/agent_feed_semantic_tests.rs
+assertion_line: 338
+expression: text
+---
+╭ Worker ──────────────────────────────▲─╮
+│                                        │
+│ Completed the parser fix. Next it will │
+│ run focused tests.                     │
+│                                        │
+│                                        │
+│                                        │
+│                                        │
+│                                        │
+│                                        │
+│ Unknown                                │
+╰────────────────────────────────────────╯

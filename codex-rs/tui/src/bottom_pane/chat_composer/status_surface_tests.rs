@@ -18,6 +18,75 @@ fn composer() -> ChatComposer {
     composer
 }
 
+#[test]
+fn numeric_agents_navigation_reserves_status_width_and_keeps_root_visible() {
+    let mut composer = composer();
+    let mut navigation = crate::app::AgentNavigationState::default();
+    let root = codex_protocol::ThreadId::new();
+    navigation.upsert(root, None, None, false);
+    for name in ["/root/schema_api_review", "/root/review", "/root/compiler"] {
+        let child = codex_protocol::ThreadId::new();
+        navigation.upsert(child, None, None, false);
+        navigation.set_agent_path(child, Some(name.to_string()));
+    }
+    for width in [100, 60, 34] {
+        navigation.set_quick_switch_width(composer.agent_navigation_width(width));
+        let line = navigation
+            .quick_switch_line(Some(root), Some(root))
+            .unwrap();
+        composer.set_active_agent_label(Some(line.clone()));
+        let (rendered, _) = render(&composer, width, None);
+        assert!(rendered.contains("[0 root]"), "{rendered}");
+        assert!(rendered.contains(&line.to_string()), "{rendered}");
+        if rendered.contains("Context 20% used") {
+            assert!(
+                rendered.find("Context 20% used") < rendered.find("[0 root]"),
+                "{rendered}"
+            );
+        }
+        if width == 100 {
+            assert!(line.to_string().contains("/schema_api_review"));
+            assert!(line.to_string().contains("/review"));
+        }
+        if width == 34 {
+            assert_eq!(line.to_string(), "[0 root]");
+        }
+    }
+}
+
+#[test]
+fn numeric_agents_navigation_shortening_fits_the_rendered_status_row() {
+    let mut composer = composer();
+    let mut navigation = crate::app::AgentNavigationState::default();
+    let root = codex_protocol::ThreadId::new();
+    navigation.upsert(root, None, None, false);
+    for name in ["/root/schema_api_review", "/root/review"] {
+        let child = codex_protocol::ThreadId::new();
+        navigation.upsert(child, None, None, false);
+        navigation.set_agent_path(child, Some(name.to_string()));
+        navigation.set_running(child, true);
+    }
+    let width = (34..140)
+        .find(|width| composer.agent_navigation_width(*width) == 33)
+        .expect("status row can reserve 33 columns for agent navigation");
+    navigation.set_quick_switch_width(composer.agent_navigation_width(width));
+    let line = navigation
+        .quick_switch_line(Some(root), Some(root))
+        .unwrap();
+    assert_eq!(line.to_string(), "[0 root] [1 /schema…] [2 /review]");
+    composer.set_active_agent_label(Some(line.clone()));
+    let (rendered, _) = render(&composer, width, None);
+    assert!(rendered.contains(&line.to_string()), "{rendered}");
+    assert!(
+        rendered.contains("MODEL · ~/project · Context 20% used"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.find("Context 20% used") < rendered.find("[0 root]"),
+        "{rendered}"
+    );
+}
+
 fn render(
     composer: &ChatComposer,
     width: u16,

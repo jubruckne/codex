@@ -38,6 +38,10 @@ pub(super) struct AgentsOverviewDetails {
     pub(super) lines: Vec<Line<'static>>,
     pub(super) usage_lines: Vec<Line<'static>>,
     pub(super) last_message: Option<(String, AbsolutePathBuf)>,
+    pub(super) current_activity: Option<String>,
+    pub(super) agent_path: Option<String>,
+    pub(super) updated_at: Option<i64>,
+    pub(super) completed: bool,
 }
 
 pub(super) fn preview_text(text: &str) -> String {
@@ -52,6 +56,10 @@ pub(super) fn preview_text(text: &str) -> String {
 pub(super) struct AgentsOverviewActivity {
     reasoning: Option<ReasoningPreview>,
     last_message: Option<String>,
+    last_reasoning_header: Option<String>,
+    active_items: Vec<(String, String)>,
+    updated_at: Option<i64>,
+    completed: Option<bool>,
 }
 
 struct ReasoningPreview {
@@ -60,6 +68,23 @@ struct ReasoningPreview {
     summary_index: i64,
     buffer: String,
     header: Option<String>,
+}
+
+fn item_activity(item: &ThreadItem) -> Option<String> {
+    Some(match item {
+        ThreadItem::Reasoning { .. } => "Thinking".into(),
+        ThreadItem::AgentMessage { .. } => "Writing response".into(),
+        ThreadItem::Plan { .. } => "Planning".into(),
+        ThreadItem::WebSearch(_) => "Searching web".into(),
+        ThreadItem::CommandExecution { command, .. } => format!("Running {}", preview_text(command)),
+        ThreadItem::ContextCompaction { .. } => "Compacting context".into(),
+        ThreadItem::FileChange { .. } => "Editing files".into(),
+        ThreadItem::McpToolCall { server, tool, .. } => format!("Calling {server}.{tool}"),
+        ThreadItem::DynamicToolCall { tool, .. } => format!("Calling {tool}"),
+        ThreadItem::CollabAgentToolCall { tool, .. } if *tool == codex_app_server_protocol::CollabAgentTool::Wait => "Waiting for agent".into(),
+        ThreadItem::CollabAgentToolCall { .. } => "Managing agents".into(),
+        _ => return None,
+    })
 }
 
 impl App {
@@ -72,6 +97,65 @@ impl App {
             return;
         }
         let activity = self.agents_overview.activity.entry(thread_id).or_default();
+        let previous_timestamp = activity.updated_at;
+        let meaningful = match notification {
+            ServerNotification::ItemStarted(started) => {
+                if let Some(label) = item_activity(&started.item) {
+                    activity.active_items.retain(|(id, _)| id != started.item.id());
+                    activity.active_items.push((started.item.id().to_string(), label));
+                }
+                true
+            }
+            ServerNotification::ItemCompleted(completed) => {
+                activity.active_items.retain(|(id, _)| id != completed.item.id());
+                if let ThreadItem::Reasoning { summary, .. } = &completed.item {
+                    if let Some(text) = summary.iter().rev().find(|text| !text.trim().is_empty()) {
+                        activity.last_reasoning_header = Some(crate::chatwidget::extract_first_bold(text)
+                            .map(|header| preview_text(&header)).unwrap_or_else(|| preview_text(text)));
+                    }
+                }
+                if activity.reasoning.as_ref().is_some_and(|reasoning| reasoning.item_id == completed.item.id()) {
+                    activity.reasoning = None;
+                }
+                true
+            }
+            ServerNotification::TurnStarted(_) => {
+                activity.active_items.clear();
+                activity.completed = Some(false);
+                activity.last_reasoning_header = None;
+                true
+            }
+            ServerNotification::TurnCompleted(turn) => {
+                activity.active_items.clear();
+                activity.completed = Some(turn.turn.status == codex_app_server_protocol::TurnStatus::Completed);
+                true
+            }
+            ServerNotification::AgentMessageDelta(delta) => {
+                if !activity.active_items.iter().any(|(id, _)| id == &delta.item_id) {
+                    activity.active_items.push((delta.item_id.clone(), "Writing response".into()));
+                }
+                true
+            }
+            ServerNotification::ThreadClosed(_) => {
+                activity.active_items.clear();
+                activity.reasoning = None;
+                true
+            }
+            ServerNotification::ReasoningSummaryTextDelta(_)
+            | ServerNotification::CommandExecutionOutputDelta(_)
+            | ServerNotification::ThreadStatusChanged(_) => true,
+            _ => false,
+        };
+        if meaningful {
+            let timestamp = match notification {
+                ServerNotification::ItemStarted(item) => Some(item.started_at_ms / 1000),
+                ServerNotification::ItemCompleted(item) => Some(item.completed_at_ms / 1000),
+                ServerNotification::TurnStarted(turn) => turn.turn.started_at,
+                ServerNotification::TurnCompleted(turn) => turn.turn.completed_at,
+                _ => None,
+            }.filter(|timestamp| *timestamp > 0).unwrap_or_else(|| chrono::Utc::now().timestamp());
+            activity.updated_at = activity.updated_at.into_iter().chain(Some(timestamp)).max();
+        }
         let changed = match notification {
             ServerNotification::ReasoningSummaryTextDelta(delta) => {
                 let had_header = activity
@@ -94,14 +178,16 @@ impl App {
                 let Some(reasoning) = activity.reasoning.as_mut() else {
                     return;
                 };
-                if reasoning.header.is_some() {
-                    return;
+                if reasoning.header.is_none() {
+                    let remaining = PREVIEW_CHARS.saturating_sub(reasoning.buffer.chars().count());
+                    reasoning.buffer.extend(delta.delta.chars().take(remaining));
+                    reasoning.header = crate::chatwidget::extract_first_bold(&reasoning.buffer)
+                        .map(|header| preview_text(&header));
                 }
-                let remaining = PREVIEW_CHARS.saturating_sub(reasoning.buffer.chars().count());
-                reasoning.buffer.extend(delta.delta.chars().take(remaining));
-                reasoning.header = crate::chatwidget::extract_first_bold(&reasoning.buffer)
-                    .map(|header| preview_text(&header));
-                had_header || reasoning.header.is_some()
+                if let Some(header) = &reasoning.header {
+                    activity.last_reasoning_header = Some(header.clone());
+                }
+                !had_header && reasoning.header.is_some()
             }
             ServerNotification::ItemCompleted(ItemCompletedNotification {
                 item: ThreadItem::AgentMessage { text, .. },
@@ -118,12 +204,51 @@ impl App {
             ServerNotification::ThreadStatusChanged(status)
                 if !matches!(status.status, ThreadStatus::Active { .. }) =>
             {
+                activity.active_items.clear();
                 activity.reasoning.take().is_some()
             }
             _ => false,
         };
-        if changed {
+        let phase_changed = matches!(notification,
+            ServerNotification::ItemStarted(_) | ServerNotification::ItemCompleted(_)
+                | ServerNotification::TurnStarted(_) | ServerNotification::TurnCompleted(_)
+                | ServerNotification::ThreadStatusChanged(_));
+        if changed || phase_changed || activity.updated_at != previous_timestamp {
             self.repaint_agents_overview();
+        }
+    }
+
+    pub(super) fn agents_overview_updated_at(&self, thread: &Thread) -> Option<i64> {
+        let metadata = (thread.updated_at > 0).then_some(thread.updated_at);
+        let received = ThreadId::from_string(&thread.id).ok()
+            .and_then(|id| self.agents_overview.activity.get(&id))
+            .and_then(|activity| activity.updated_at);
+        metadata.into_iter().chain(received).max()
+    }
+
+    pub(super) fn record_agents_overview_turn_metadata(&mut self, thread_id: ThreadId, thread: &Thread) {
+        if let Some(turn) = thread.turns.last() {
+            let activity = self.agents_overview.activity.entry(thread_id).or_default();
+            if activity.updated_at.is_none() {
+                activity.completed = Some(turn.status == codex_app_server_protocol::TurnStatus::Completed);
+                // Recover explicitly running tools from existing reads when we missed ItemStarted.
+                if turn.status == codex_app_server_protocol::TurnStatus::InProgress {
+                    activity.last_reasoning_header = turn.items.iter().rev().find_map(|item| match item {
+                        ThreadItem::Reasoning { summary, .. } => summary.iter().rev()
+                            .find(|text| !text.trim().is_empty()).map(|text| crate::chatwidget::extract_first_bold(text)
+                                .map(|header| preview_text(&header)).unwrap_or_else(|| preview_text(text))),
+                        _ => None,
+                    });
+                    activity.active_items = turn.items.iter().filter(|item| match item {
+                        ThreadItem::CommandExecution { status, .. } => *status == codex_app_server_protocol::CommandExecutionStatus::InProgress,
+                        ThreadItem::McpToolCall { status, .. } => *status == codex_app_server_protocol::McpToolCallStatus::InProgress,
+                        ThreadItem::DynamicToolCall { status, .. } => *status == codex_app_server_protocol::DynamicToolCallStatus::InProgress,
+                        ThreadItem::FileChange { status, .. } => *status == codex_app_server_protocol::PatchApplyStatus::InProgress,
+                        ThreadItem::CollabAgentToolCall { status, .. } => *status == codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
+                        _ => false,
+                    }).filter_map(|item| item_activity(item).map(|label| (item.id().to_string(), label))).collect();
+                }
+            }
         }
     }
 
@@ -168,11 +293,8 @@ impl App {
         let channel = self.thread_event_channels.get(&thread_id);
         let is_child = source.id != root.id;
         if is_child {
-            let name = source
-                .agent_nickname
-                .as_deref()
-                .or(source.name.as_deref())
-                .unwrap_or(&source.id);
+            let path = self.agents_overview_agent_path(source);
+            let name = path.as_deref().or(source.name.as_deref()).unwrap_or(&source.id);
             lines.push(Line::default());
             lines.push(vec!["Agent: ".dim(), preview_text(name).into()].into());
         }
@@ -215,7 +337,30 @@ impl App {
             .or_else(|| self.agents_overview.last_messages.get(&thread_id))
             .filter(|message| !message.trim().is_empty())
             .map(|message| (message.clone(), source.cwd.clone()));
+        let current_activity = self.agents_overview.activity.get(&ThreadId::from_string(&root.id).unwrap_or(thread_id));
         AgentsOverviewDetails {
+            agent_path: self.agents_overview_agent_path(root),
+            current_activity: match &root.status {
+                ThreadStatus::Active { active_flags } => {
+                    if active_flags.contains(&ThreadActiveFlag::WaitingOnApproval) {
+                        Some("Waiting for approval".into())
+                    } else if active_flags.contains(&ThreadActiveFlag::WaitingOnUserInput) {
+                        Some("Waiting for your response".into())
+                    } else {
+                        current_activity.and_then(|activity| {
+                            activity.active_items.last().map(|(_, label)| {
+                                if label == "Thinking" {
+                                    activity.reasoning.as_ref().and_then(|reasoning| reasoning.header.clone()).unwrap_or_else(|| label.clone())
+                                } else { label.clone() }
+                            }).or_else(|| activity.reasoning.as_ref().map(|reasoning| reasoning.header.clone().unwrap_or_else(|| "Thinking".into())))
+                        }).or_else(|| current_activity.and_then(|activity| activity.last_reasoning_header.clone()))
+                            .or_else(|| Some("Working".into()))
+                    }
+                }
+                ThreadStatus::NotLoaded | ThreadStatus::Idle | ThreadStatus::SystemError => None,
+            },
+            updated_at: self.agents_overview_updated_at(root),
+            completed: current_activity.is_some_and(|activity| activity.completed == Some(true)),
             lines,
             usage_lines: ThreadId::from_string(&root.id)
                 .ok()
@@ -224,6 +369,15 @@ impl App {
                 .unwrap_or_default(),
             last_message,
         }
+    }
+
+    fn agents_overview_agent_path(&self, thread: &Thread) -> Option<String> {
+        crate::app_server_session::source_agent_path(&thread.source)
+            .filter(|path| !path.trim().is_empty())
+            .or_else(|| ThreadId::from_string(&thread.id).ok()
+                .and_then(|id| self.agent_navigation.get(&id))
+                .and_then(|entry| entry.agent_path.clone())
+                .filter(|path| !path.trim().is_empty()))
     }
 
     fn agents_overview_request_preview(&self, thread_id: ThreadId) -> Option<String> {

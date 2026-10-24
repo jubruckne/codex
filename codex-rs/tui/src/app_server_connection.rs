@@ -15,6 +15,7 @@ use codex_app_server_client::RemoteAppServerEndpoint;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 pub(crate) async fn connect(target: &AppServerTarget) -> color_eyre::Result<AppServerClient> {
+    crate::client_only::validate_target(target)?;
     match target {
         AppServerTarget::Embedded => {
             color_eyre::eyre::bail!("embedded sessions have no remote connection");
@@ -40,7 +41,9 @@ pub(crate) async fn connect(target: &AppServerTarget) -> color_eyre::Result<AppS
                     channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
                 })
                 .await?;
-            Ok(AppServerClient::Remote(app_server))
+            Ok(AppServerClient::Remote(
+                app_server.with_request_filter(crate::client_only::filter_request),
+            ))
         }
         AppServerTarget::LocalDaemon { endpoint, .. } | AppServerTarget::Remote { endpoint } => {
             connect_remote_app_server(endpoint.clone()).await

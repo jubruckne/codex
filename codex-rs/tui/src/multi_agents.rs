@@ -88,7 +88,7 @@ pub(crate) fn format_agent_picker_item_name(
     is_primary: bool,
 ) -> String {
     if is_primary {
-        return "Main [default]".to_string();
+        return "root".to_string();
     }
 
     let agent_nickname = agent_nickname

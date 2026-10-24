@@ -3,6 +3,7 @@
 //! shadowed slot from another configuration layer.
 
 use super::App;
+use crate::client_only::ProtectedConfigEdits;
 use crate::chatwidget::quick_dials::QuickDialEditorTarget;
 use crate::config_update::format_config_error;
 use crate::legacy_core::config::edit::ConfigEdit;
@@ -66,7 +67,7 @@ impl App {
         if let Err(error) =
             ConfigEditsBuilder::for_config_path(self.local_settings.user_config_path.as_path())
                 .with_edits([edit])
-                .apply()
+                .reject_shared_config_write()
                 .await
         {
             self.chat_widget.add_error_message(format!(

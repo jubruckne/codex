@@ -243,6 +243,7 @@ mod composer_submission;
 mod computer_activity_tests;
 #[path = "tests/config_errors_tests.rs"]
 mod config_errors;
+mod context_summary_tests;
 #[path = "tests/copy_export_picker_tests.rs"]
 mod copy_export_picker_tests;
 #[path = "tests/dynamic_activity_tests.rs"]
@@ -333,3 +334,5 @@ mod security_setup_tests;
 
 #[path = "tests/quick_dials_tests.rs"]
 mod quick_dials_tests;
+#[path = "tests/status_and_reasoning.rs"]
+mod status_and_reasoning;

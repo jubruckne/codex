@@ -14,7 +14,14 @@ use codex_app_server_protocol::ExperimentalFeatureStage;
 use codex_app_server_protocol::RequestId;
 use std::collections::BTreeMap;
 
-pub(super) const FAILURE_HINT: &str = "To work without the background server, rerun the same command with --no-daemon (including resume or fork and its arguments).";
+const SERVER_FEATURES: [Feature; 4] = [
+    Feature::ApiKeyModelDiscovery,
+    Feature::CodeModeHost,
+    Feature::AuthElicitation,
+    Feature::McpOAuthRefreshCoordination,
+];
+
+pub(super) const FAILURE_HINT: &str = "Codex++ requires an already-running compatible official Codex service. Manage it using the official Codex CLI, then retry.";
 pub(super) const WSL_DRVFS_EXCLUSION: &str = "a Windows-mounted WSL CODEX_HOME (DrvFS/9p)";
 
 /// Returns whether `codex_home` is on a Windows-mounted WSL filesystem.
@@ -147,6 +154,9 @@ pub(super) async fn compatibility_warning(
         .flatten()
         .filter_map(|(name, value)| {
             let name = match codex_features::feature_for_key(name) {
+                // This is our frontend's injected lifecycle policy, not a requirement
+                // on the running official service. Auto-start remains disabled locally.
+                Some(Feature::DaemonAutoStart) => return None,
                 Some(feature) if feature.stage() == codex_features::Stage::Removed => return None,
                 Some(feature) => feature.key(),
                 None => name,
@@ -159,7 +169,11 @@ pub(super) async fn compatibility_warning(
         // Connect even without overrides so startup can recover from an unreachable daemon.
         let client = app_server_connection::connect(target)
             .await
-            .map_err(|_| "could not connect to check daemon feature settings".to_string())?;
+            .map_err(|err| {
+                format!("could not connect to check daemon feature settings: {err:#}")
+            })?;
+        // File settings and defaults belong to the daemon until it restarts.
+        // Only explicit invocation flags can request a shared-service restart.
         if requested.is_empty() {
             let _ = client.shutdown().await;
             return Ok(());

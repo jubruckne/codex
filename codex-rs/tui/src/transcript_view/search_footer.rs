@@ -104,3 +104,50 @@ impl Search {
         )
     }
 }
+
+impl Search {
+    pub(in crate::transcript_view) fn gap_status(
+        &self,
+        width: u16,
+        history: TranscriptHistoryState,
+    ) -> Line<'static> {
+        if width < 3 {
+            return Line::default();
+        }
+        let previous = crate::key_hint::ctrl(crossterm::event::KeyCode::Char('p')).display_label();
+        let (full, short) = match self.progress {
+            Progress::Idle if self.editor.is_empty() => ("Type to find · esc".into(), "esc".into()),
+            Progress::Restart | Progress::Scanning(_) => {
+                ("Searching… · esc".into(), "Searching…".into())
+            }
+            Progress::AwaitingHistory if history == TranscriptHistoryState::Failed => (
+                format!("History unavailable · {previous} retry · esc"),
+                format!("{previous} retry"),
+            ),
+            Progress::AwaitingHistory => ("Loading history… · esc".into(), "Loading…".into()),
+            Progress::Exhausted if self.current.is_none() => {
+                ("No matches · esc".into(), "No matches".into())
+            }
+            Progress::Exhausted => ("No more matches · esc".into(), "No more matches".into()),
+            _ => (
+                format!("enter accept · {previous} older · esc"),
+                "enter · esc".into(),
+            ),
+        };
+        let full = if self.query_truncated {
+            format!("{full} · query limited to 4 KiB")
+        } else {
+            full
+        };
+        let short = if self.query_truncated {
+            format!("{short} · 4 KiB limit")
+        } else {
+            short
+        };
+        crate::footer_hint::first_fitting_line(
+            [full, short, "esc".into()]
+                .map(|line| crate::transcript_view::footer::navigation_line(&line)),
+            width,
+        )
+    }
+}

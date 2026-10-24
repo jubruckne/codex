@@ -221,6 +221,10 @@ async fn older_page_loading_uses_the_status_row_without_moving_content_or_cursor
         let cursor = tui.terminal.last_known_cursor_pos;
         let before =
             crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal).clone();
+        let context_y = buffer_text(&before)
+            .lines()
+            .position(|line| line.contains("Back to bottom") || line.contains("↓ Bottom"))
+            .expect("reading context in the gap") as u16;
         for state in [
             TranscriptHistoryState::LoadingOlder,
             TranscriptHistoryState::LoadingBeginning,
@@ -234,25 +238,27 @@ async fn older_page_loading_uses_the_status_row_without_moving_content_or_cursor
                 (actual_bottom, tui.terminal.last_known_cursor_pos),
                 (bottom, cursor)
             );
-            let status_start = buffer.index_of(/*x*/ 0, size.height - 1);
-            assert_eq!(
-                &buffer.content()[..status_start],
-                &before.content()[..status_start]
-            );
-            if state == TranscriptHistoryState::Complete {
+            // Only the existing gap changes; transcript, composer, and model status stay put.
+            for row in 0..size.height {
+                if row == context_y {
+                    continue;
+                }
+                let start = buffer.index_of(0, row);
+                let end = start + usize::from(size.width);
                 assert_eq!(
-                    buffer_text(buffer).lines().last().unwrap().trim(),
-                    "esc latest",
-                );
-            }
-            if state == TranscriptHistoryState::LoadingOlder {
-                assert_eq!(
-                    buffer[(2, size.height - 1)].fg,
-                    crate::style::accent_color()
+                    &buffer.content()[start..end],
+                    &before.content()[start..end],
+                    "row {row}"
                 );
             }
             let rendered = buffer_text(buffer);
-            let rendered = rendered.lines().last().unwrap();
+            let rendered = rendered.lines().nth(usize::from(context_y)).unwrap();
+            if state == TranscriptHistoryState::Complete {
+                assert!(rendered.contains("↓"), "return navigation stays in the gap");
+            }
+            if state == TranscriptHistoryState::LoadingOlder {
+                assert_eq!(buffer[(2, context_y)].fg, crate::style::accent_color());
+            }
             snapshots.push(format!("{width} columns · {state:?}\n{rendered}"));
         }
     }
@@ -978,18 +984,23 @@ async fn find_owns_editor_chords_without_changing_the_composer_draft() -> Result
                     .lines()
                     .nth(usize::from(cursor.y))
                     .expect("visible query caret");
-                assert_eq!(query_row.trim(), "Find: alpha betax");
-                assert!(rendered.contains("h move line start"));
-                insta::assert_snapshot!(
-                    "owned_find_pending_chord_footer",
-                    rendered
-                        .lines()
-                        .skip(usize::from(cursor.y))
-                        .take(/*n*/ 2)
-                        .map(str::trim)
-                        .collect::<Vec<_>>()
-                        .join("\n")
+                assert_eq!(
+                    query_row.trim().split(" · ").next().unwrap().trim(),
+                    "Find: alpha betax"
                 );
+                if !owned {
+                    assert!(rendered.contains("h move line start"));
+                    insta::assert_snapshot!(
+                        "owned_find_pending_chord_footer",
+                        rendered
+                            .lines()
+                            .skip(usize::from(cursor.y))
+                            .take(/*n*/ 2)
+                            .map(str::trim)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                }
             }
         }
         app.handle_tui_event(&mut tui, &mut app_server, TuiEvent::Draw)
@@ -1000,7 +1011,7 @@ async fn find_owns_editor_chords_without_changing_the_composer_draft() -> Result
         assert!(
             rendered
                 .lines()
-                .any(|line| line.trim() == "Find: apha betax")
+                .any(|line| line.trim().split(" · ").next().unwrap().trim() == "Find: apha betax")
         );
         assert_eq!(
             app.chat_widget.composer_text_with_pending(),
@@ -1046,7 +1057,12 @@ async fn offline_find_closes_before_the_next_ctrl_c_quits() -> Result<()> {
     ));
     let cursor = tui.terminal.last_known_cursor_pos;
     assert_eq!(
-        rendered.lines().nth(usize::from(cursor.y)).map(str::trim),
+        rendered.lines().nth(usize::from(cursor.y)).map(|line| line
+            .trim()
+            .split(" · ")
+            .next()
+            .unwrap()
+            .trim()),
         Some("Find: needle")
     );
     assert!(!rendered.contains("⌃c quit"));
@@ -1360,17 +1376,22 @@ mod browsing;
 #[tokio::test]
 async fn find_refreshes_live_details_before_searching_the_first_query() -> Result<()> {
     let mut app = crate::app::test_support::make_test_app().await;
-    crate::chatwidget::tests::helpers::set_active_cell(
-        &mut app.chat_widget,
-        Box::new(crate::exec_cell::new_active_exec_command(
-            "live".into(),
-            vec!["printf visible\nprintf needle".into()],
-            Vec::new(),
-            codex_app_server_protocol::CommandExecutionSource::Agent,
-            /*interaction_input*/ None,
-            /*animations_enabled*/ false,
-        )),
+    let mut command = crate::exec_cell::new_active_exec_command(
+        "live".into(),
+        vec!["printf visible".into()],
+        Vec::new(),
+        codex_app_server_protocol::CommandExecutionSource::Agent,
+        /*interaction_input*/ None,
+        /*animations_enabled*/ false,
     );
+    // Search must refresh detailed live output before the first query. Keep the match
+    // outside the compact tail without relying on command source being clipped.
+    let output = format!(
+        "printf needle\n{}",
+        "visible output\n".repeat(crate::history_cell::activity_preview::DETAIL_PREVIEW_LINES + 1),
+    );
+    assert!(command.append_output("live", &output));
+    crate::chatwidget::tests::helpers::set_active_cell(&mut app.chat_widget, Box::new(command));
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
     let mut tui = crate::tui::test_support::make_test_tui()?;
     tui.set_owned_screen(/*owned*/ true)?;

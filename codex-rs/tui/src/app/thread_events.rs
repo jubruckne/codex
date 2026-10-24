@@ -10,6 +10,7 @@ use std::borrow::Cow;
 
 #[derive(Debug, Clone)]
 pub(super) struct ThreadEventSnapshot {
+    pub(super) turn_tokens: crate::token_usage::TurnTokenUsage,
     pub(super) session: Option<ThreadSessionState>,
     pub(super) delegated_turns: Vec<String>,
     pub(super) turns: Vec<Turn>,
@@ -61,6 +62,7 @@ pub(super) enum ThreadEventAttachment {
 
 #[derive(Debug)]
 pub(super) struct ThreadEventStore {
+    pub(super) turn_tokens: crate::token_usage::TurnTokenUsage,
     pub(super) session: Option<ThreadSessionState>,
     pub(super) turns: Vec<Turn>,
     pub(super) buffer: VecDeque<ThreadBufferedEvent>,
@@ -108,6 +110,7 @@ impl ThreadEventStore {
 
     pub(super) fn new(capacity: usize) -> Self {
         Self {
+            turn_tokens: Default::default(),
             session: None,
             turns: Vec::new(),
             buffer: VecDeque::new(),
@@ -148,6 +151,9 @@ impl ThreadEventStore {
     }
 
     pub(super) fn set_turns(&mut self, turns: Vec<Turn>) {
+        if turns.is_empty() {
+            self.turn_tokens.seed_empty_thread();
+        }
         if self.active_reasoning_item.as_ref().is_some_and(|started| {
             turns.iter().any(|turn| {
                 (turn.id == started.turn_id && turn.status != TurnStatus::InProgress)
@@ -163,6 +169,9 @@ impl ThreadEventStore {
             .rev()
             .find(|turn| matches!(turn.status, TurnStatus::InProgress))
             .map(|turn| turn.id.clone());
+        if let Some(id) = &self.active_turn_id {
+            self.turn_tokens.resume(id);
+        }
         self.latest_turn_id = turns.last().map(|turn| turn.id.clone());
         self.turns = turns;
     }
@@ -196,7 +205,16 @@ impl ThreadEventStore {
         self.pending_interactive_replay
             .note_server_notification(notification.as_ref());
         match notification.as_ref() {
+            ServerNotification::ThreadTokenUsageUpdated(usage) => {
+                self.turn_tokens.observe_with_context(
+                    &usage.turn_id,
+                    usage.token_usage.total.input_tokens,
+                    usage.token_usage.total.output_tokens,
+                    usage.token_usage.last.total_tokens,
+                );
+            }
             ServerNotification::TurnStarted(turn) => {
+                self.turn_tokens.start(&turn.turn.id);
                 self.set_active_turn_id(turn.turn.id.clone());
                 if self
                     .active_reasoning_item
@@ -207,6 +225,8 @@ impl ThreadEventStore {
                 }
             }
             ServerNotification::TurnCompleted(turn) => {
+                self.turn_tokens.snapshot_counts(&turn.turn.id);
+                self.turn_tokens.snapshot_context_growth(&turn.turn.id);
                 if self
                     .active_reasoning_item
                     .as_ref()
@@ -355,6 +375,7 @@ impl ThreadEventStore {
 
     pub(super) fn snapshot(&self) -> ThreadEventSnapshot {
         let mut snapshot = ThreadEventSnapshot {
+            turn_tokens: self.turn_tokens.clone(),
             session: self.session.clone(),
             delegated_turns: self.delegated_turns.iter().cloned().collect(),
             turns: self.turns.clone(),

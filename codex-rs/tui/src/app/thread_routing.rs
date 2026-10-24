@@ -165,7 +165,7 @@ impl App {
     pub(super) fn thread_label(&self, thread_id: ThreadId) -> String {
         let is_primary = self.primary_thread_id == Some(thread_id);
         let fallback_label = if is_primary {
-            "Main [default]".to_string()
+            "root".to_string()
         } else {
             let thread_id = thread_id.to_string();
             let short_id: String = thread_id.chars().take(8).collect();
@@ -219,18 +219,28 @@ impl App {
         true
     }
 
-    /// Mirrors the visible thread into the contextual footer row.
-    ///
-    /// The footer sometimes shows ambient context instead of an instructional hint. In multi-agent
-    /// sessions, that contextual row includes the currently viewed agent label. The label is
-    /// intentionally hidden until there is more than one known thread so single-thread sessions do
-    /// not spend footer space restating that the user is already on the main conversation.
+    /// Mirrors the stable numbered destinations into the contextual footer. Slot zero is root,
+    /// and the currently displayed thread is highlighted without changing slot order.
     pub(super) fn sync_active_agent_label(&mut self) {
-        let label = self
-            .agent_navigation
-            .active_agent_label(self.current_displayed_thread_id(), self.primary_thread_id);
-        self.chat_widget.set_active_agent_label(label);
+        self.sync_agent_navigation_strip();
         self.sync_side_thread_ui();
+    }
+
+    pub(super) fn sync_agent_navigation_strip(&mut self) {
+        let current = self.current_displayed_thread_id();
+        let label = if matches!(self.app_server_target, AppServerTarget::LocalDaemon { .. }) {
+            let threads = &self.agents_overview.threads;
+            self.agent_navigation.quick_switch_line_with_status(
+                current,
+                self.primary_thread_id,
+                |id| threads.get(&id).and_then(Option::as_ref).map(|thread| &thread.status),
+            )
+        } else {
+            self.agent_navigation
+                .active_agent_label(current, self.primary_thread_id)
+                .map(|label| Line::from(label).style(crate::style::secondary_text_style()))
+        };
+        self.chat_widget.set_active_agent_label(label);
     }
 
     pub(super) async fn thread_cwd(&self, thread_id: ThreadId) -> Option<AbsolutePathBuf> {
@@ -1129,6 +1139,8 @@ impl App {
                 turn_stopped,
             )
         };
+        self.agent_navigation
+            .note_updated_at(thread_id, chrono::Utc::now().timestamp_millis());
         if is_turn_started {
             self.agent_navigation.mark_running(thread_id);
         } else if is_thread_closed {
@@ -1136,6 +1148,8 @@ impl App {
         } else if turn_stopped {
             self.agent_navigation.mark_stopped(thread_id);
         }
+
+        self.sync_agent_navigation_strip();
 
         // Settings snapshots do not belong in the transcript queue: apply them in receive order.
         if let Some(ServerNotification::ThreadSettingsUpdated(settings)) = notification.as_ref()
@@ -1480,6 +1494,11 @@ impl App {
                 }
             }
         }
+        if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+            let store = channel.store.lock().await;
+            self.chat_widget
+                .restore_turn_tokens(store.turn_tokens.clone());
+        }
         self.chat_widget
             .set_initial_user_message_submit_suppressed(/*suppressed*/ false);
         self.chat_widget.submit_initial_user_message_if_pending();
@@ -1582,6 +1601,7 @@ impl App {
             store.set_session(session.clone(), turns.clone());
             store.rebase_buffer_after_session_refresh();
             snapshot.active_reasoning_item = store.active_reasoning_item.clone();
+            snapshot.turn_tokens = store.turn_tokens.clone();
         }
         snapshot.session = Some(session);
         snapshot.turns = turns;
@@ -1672,6 +1692,7 @@ impl App {
         mut snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
+        let turn_tokens = snapshot.turn_tokens.clone();
         let mut reasoning_replay = reasoning_replay::ReasoningReplay::new(&mut snapshot);
         let replayed_final_items = realtime_delivery::completed_agent_items(&snapshot);
         let replayed_voice_texts = realtime_delivery::replayed_voice_texts(&snapshot);
@@ -1782,6 +1803,7 @@ impl App {
             }
         }
         reasoning_replay.restore(&mut self.chat_widget);
+        self.chat_widget.restore_turn_tokens(turn_tokens);
         if should_buffer_replay {
             self.app_event_tx
                 .send(AppEvent::EndInitialHistoryReplayBuffer);

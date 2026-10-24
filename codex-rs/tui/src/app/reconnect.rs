@@ -213,6 +213,7 @@ impl App {
             return false;
         }
         if !self.reconnect.offline {
+            self.invalidate_agent_feed();
             #[cfg(target_os = "windows")]
             if self.windows_sandbox_setup_is_local()
                 && let Some(message) = self.chat_widget.initial_user_message.take()

@@ -22,7 +22,33 @@ pub(super) struct ThreadUsageStatusHistory {
 }
 
 impl App {
-    pub(super) fn insert_history_cell(&mut self, tui: &mut tui::Tui, cell: Box<dyn HistoryCell>) {
+    pub(super) fn insert_history_cell(
+        &mut self,
+        tui: &mut tui::Tui,
+        mut cell: Box<dyn HistoryCell>,
+    ) {
+        if let Some(exec) = cell
+            .as_any_mut()
+            .downcast_mut::<crate::exec_cell::ExecCell>()
+        {
+            exec.configure_native(!tui.is_owned_screen(), None, true);
+        }
+        if let Some(call) = cell
+            .as_any_mut()
+            .downcast_mut::<history_cell::McpToolCallCell>()
+        {
+            call.configure_native(!tui.is_owned_screen(), None, true);
+        }
+        if let Some(call) = cell
+            .as_any_mut()
+            .downcast_mut::<history_cell::DynamicToolCallCell>()
+        {
+            call.configure_native(
+                !tui.is_owned_screen(),
+                Some(tui.frame_requester().clone()),
+                self.local_settings.tui.animations && self.local_settings.tui.effects.progress,
+            );
+        }
         // Global deprecations can be delivered again by hidden threads. Scope deduplication to
         // retained history so clearing or rebuilding a transcript can show the notice again.
         if let Some(notice) = cell

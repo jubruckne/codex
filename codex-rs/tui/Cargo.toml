@@ -22,6 +22,7 @@ doctest = false
 workspace = true
 
 [dependencies]
+vt100 = { workspace = true }
 codex-build-info = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true, default-features = false, features = ["http1", "tokio"] }
@@ -187,6 +188,8 @@ pretty_assertions = { workspace = true }
 rand = { workspace = true }
 serial_test = { workspace = true }
 tokio-tungstenite = { workspace = true }
-vt100 = { workspace = true }
 uuid = { workspace = true }
 wiremock = { workspace = true }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+foundation-models = { version = "=0.12.0", features = ["macos_26_0", "async"] }

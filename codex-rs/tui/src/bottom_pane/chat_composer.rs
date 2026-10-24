@@ -12,13 +12,16 @@
 //! paste only while the same thread, draft, and cursor remain eligible. Intervening input or focus
 //! loss cancels the pending paste; a late clipboard result cannot overwrite newer input.
 //! The live voice strip renders after effort ignition, followed by the Astra sparkle when eligible.
-//! Owned transcripts keep persistent status below the composer and hints on a separate final row.
-//! Shortcut help expands above the composer, with its close hint replacing the final shortcuts row
-//! so input and persistent status stay anchored when help opens or closes.
+//! Owned transcripts keep persistent status below the composer and project contextual queries,
+//! warnings, and feedback into the existing gap above it. The contextual footer reserves zero rows,
+//! reclaiming one transcript row while the configured model/context status surface stays below input.
+//! Shortcut help expands above the composer; its close action uses the same gap.
 //! Escape dismisses visible shortcut help before editing, transcript backtracking, or interruption.
 //! Fullscreen limits the composer height; wheel browsing preserves the caret until editor input.
-//! Transcript interactions borrow the hint footer through `ComposerRenderOptions`;
-//! its resolved presentation drives height, painting, and the focused cursor together.
+//! Transcript interactions retain their input ownership through `ComposerRenderOptions`;
+//! the app paints their one-row presentation and focused cursor in the shared composer gap.
+//! Reverse history search keeps its query and original draft in the composer; Vim query state
+//! stays in the textarea. Their gap presentation does not replace the draft or match preview.
 //!
 //! Preset submenu hints borrow slots and reflow with the composer.
 //!
@@ -351,6 +354,7 @@ use super::footer::side_conversation_context_line;
 use super::footer::single_line_footer_layout;
 use super::footer::status_line_right_indicator_line;
 use super::footer::toggle_shortcut_mode;
+use super::footer::truncate_status_line_preserving_agents;
 use super::footer::uses_passive_footer_status_layout;
 use super::mention_usage::MentionUsage;
 use super::mentions_v2::MentionV2Popup;
@@ -388,6 +392,7 @@ mod completion_target;
 mod composer_layout;
 mod draft_state;
 mod footer_state;
+mod gap_surface;
 mod history_search;
 mod inline_input;
 mod mouse;
@@ -4359,7 +4364,10 @@ impl ChatComposer {
     /// Returning `false` means the value was unchanged, so callers can skip redraw work. This
     /// field is intentionally just cached presentation state; `ChatComposer` does not infer which
     /// thread is active on its own.
-    pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) -> bool {
+    pub(crate) fn set_active_agent_label(
+        &mut self,
+        active_agent_label: Option<Line<'static>>,
+    ) -> bool {
         if self.footer.active_agent_label == active_agent_label {
             return false;
         }
@@ -4582,6 +4590,16 @@ impl ChatComposer {
         let warning_notice = self.warning_notice_layout(transcript_hint_area, options);
         let warning_area = warning_notice.as_ref().map(|(area, _)| *area);
         match options.footer {
+            _ if options.composer_gap.is_some() => {
+                if self.shortcuts_above_composer(options) {
+                    let props = self.hint_footer_props(options);
+                    super::shortcut_overlay::render(
+                        &props,
+                        inset_footer_hint_area(popup_rect),
+                        buf,
+                    );
+                }
+            }
             Some(footer) => {
                 self.render_transcript_footer(transcript_hint_area, buf, footer, warning_area);
             }
@@ -4657,7 +4675,11 @@ impl ChatComposer {
                     };
                     let mut truncated_status_line = if status_line_active {
                         combined_status_line.as_ref().map(|line| {
-                            truncate_line_with_ellipsis_if_overflow(line.clone(), available_width)
+                            truncate_status_line_preserving_agents(
+                                line.clone(),
+                                available_width,
+                                footer_props.active_agent_label.as_ref(),
+                            )
                         })
                     } else {
                         None
@@ -4715,7 +4737,11 @@ impl ChatComposer {
                         && let Some(max_left) = max_left_width_for_right(hint_rect, right_width)
                         && left_width > max_left
                         && let Some(line) = combined_status_line.as_ref().map(|line| {
-                            truncate_line_with_ellipsis_if_overflow(line.clone(), max_left as usize)
+                            truncate_status_line_preserving_agents(
+                                line.clone(),
+                                max_left as usize,
+                                footer_props.active_agent_label.as_ref(),
+                            )
                         })
                     {
                         left_width = line.width() as u16;

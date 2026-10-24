@@ -55,6 +55,9 @@ pub(crate) struct McpToolCallCell {
     duration: Option<Duration>,
     result: Option<Result<McpToolResult, String>>,
     animations_enabled: bool,
+    native_presentation: bool,
+    native_committed: bool,
+    native_frame_requester: Option<crate::tui::FrameRequester>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +100,85 @@ impl McpToolCallCell {
             duration: None,
             result: None,
             animations_enabled,
+            native_presentation: false,
+            native_committed: false,
+            native_frame_requester: None,
         }
+    }
+
+    pub(crate) fn configure_native(
+        &mut self,
+        enabled: bool,
+        requester: Option<crate::tui::FrameRequester>,
+        committed: bool,
+    ) {
+        self.native_presentation = enabled;
+        self.native_frame_requester = requester;
+        self.native_committed = committed;
+    }
+
+    fn native_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        let status = self.success();
+        let marker = if status == Some(false) {
+            "✗".red().bold()
+        } else {
+            "•".dim()
+        };
+        let verb = if status.is_some() {
+            "Called"
+        } else {
+            "Calling"
+        };
+        let mut lines = vec![super::activity_preview::clipped_line(
+            Line::from(vec![
+                marker,
+                format!(" {verb} ").bold(),
+                format!("{}.{}", self.invocation.server, self.invocation.tool).fg(accent_color()),
+            ]),
+            width,
+        )];
+        if let Some(arguments) = &self.invocation.arguments {
+            let mut preview = arguments.clone();
+            if self.result_kind() == McpResultKind::NodeRepl
+                && let Some(fields) = preview.as_object_mut()
+            {
+                fields.remove("code");
+            }
+            lines.extend(super::native_tools::arguments(&preview, width));
+            // Code Mode already exposes its source via the MCP invocation. Keep it verbatim.
+            if self.result_kind() == McpResultKind::NodeRepl
+                && let Some(code) = arguments.get("code").and_then(serde_json::Value::as_str)
+            {
+                lines.extend(adaptive_wrap_hyperlink_lines(
+                    &crate::terminal_hyperlinks::plain_hyperlink_lines(raw_lines_from_source(code)),
+                    RtOptions::new(usize::from(width).max(1))
+                        .initial_indent("  │ ".dim().into())
+                        .subsequent_indent("  │ ".dim().into()),
+                ));
+            }
+        }
+        if status == Some(false) {
+            lines.push(super::native_tools::error(
+                if self
+                    .result
+                    .as_ref()
+                    .is_some_and(|result| matches!(result, Err(error) if error == "interrupted"))
+                {
+                    "Cancelled"
+                } else {
+                    "Error: tool call failed (Ctrl+T for details)"
+                },
+                width,
+            ));
+        } else if status.is_none() && !self.native_committed {
+            lines.push(super::native_tools::spinner(
+                self.start_time,
+                self.animations_enabled,
+                self.native_frame_requester.as_ref(),
+                width,
+            ));
+        }
+        lines
     }
 
     pub(crate) fn call_id(&self) -> &str {
@@ -361,7 +442,11 @@ impl HistoryCell for McpToolCallCell {
     }
 
     fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        self.compact_mcp_lines(width)
+        if self.native_presentation {
+            self.native_lines(width)
+        } else {
+            self.compact_mcp_lines(width)
+        }
     }
 
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -373,11 +458,44 @@ impl HistoryCell for McpToolCallCell {
     }
 
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        self.render_hyperlink_lines(width, McpToolCallRenderMode::Display)
+        if self.native_presentation {
+            self.native_lines(width)
+        } else {
+            self.render_hyperlink_lines(width, McpToolCallRenderMode::Display)
+        }
     }
 
     fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         self.render_hyperlink_lines(width, McpToolCallRenderMode::Transcript)
+    }
+
+    fn display_lines_for_mode(&self, width: u16, mode: HistoryRenderMode) -> Vec<Line<'static>> {
+        if self.native_presentation {
+            let lines = self.display_lines(width);
+            return if mode == HistoryRenderMode::Raw {
+                super::plain_lines(lines)
+            } else {
+                lines
+            };
+        }
+        if mode == HistoryRenderMode::Raw {
+            self.raw_lines()
+        } else {
+            self.display_lines(width)
+        }
+    }
+    fn display_hyperlink_lines_for_mode(
+        &self,
+        width: u16,
+        mode: HistoryRenderMode,
+    ) -> Vec<HyperlinkLine> {
+        if mode == HistoryRenderMode::Raw {
+            crate::terminal_hyperlinks::plain_hyperlink_lines(
+                self.display_lines_for_mode(width, mode),
+            )
+        } else {
+            self.display_hyperlink_lines(width)
+        }
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {

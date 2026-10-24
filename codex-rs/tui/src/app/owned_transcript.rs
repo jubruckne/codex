@@ -118,6 +118,8 @@ impl App {
         tui: &mut tui::Tui,
         screen_size: Size,
     ) -> Result<Rect> {
+        let physical_size = screen_size;
+        let windows_enabled = self.agent_windows_enabled(tui);
         self.chat_widget.sync_warnings(&self.transcript_cells);
         let motion = MotionMode::from_animations_enabled(
             self.local_settings.tui.animations && self.local_settings.tui.effects.shimmer,
@@ -130,21 +132,7 @@ impl App {
         };
         self.sync_owned_transcript(screen_size.width);
         let transcript_width = self.chat_widget.history_wrap_width(screen_size.width);
-        let composer_hint = if self
-            .chat_widget
-            .rendered_selection
-            .borrow()
-            .view
-            .has_active_interaction()
-        {
-            Some(
-                ratatui::text::Line::from("Selecting text · esc cancel")
-                    .dim()
-                    .into(),
-            )
-        } else {
-            self.composer_hint(transcript_width)
-        };
+        let composer_hint = self.composer_hint(transcript_width);
         let now = Instant::now();
         let turn_tip = self.turn_tip(transcript_width, now, &tui.frame_requester());
         let working_tip = turn_tip
@@ -160,6 +148,10 @@ impl App {
         .then(crate::bottom_pane::ComposerGap::default);
         let mut prompt_footer =
             self.prompt_navigation_footer(screen_size.width.saturating_sub(/*rhs*/ 2));
+        let feed = self
+            .agent_feed
+            .root
+            .and_then(|root| self.agent_feed.roots.get(&root));
         let chat_widget = &self.chat_widget;
         let view = &mut self.transcript_view;
         let active_key = chat_widget.active_cell_transcript_key();
@@ -171,10 +163,46 @@ impl App {
         let footer_area = crate::bottom_pane::inset_footer_hint_area(Rect::new(
             /*x*/ 0,
             /*y*/ 0,
-            screen_size.width,
+            transcript_width,
             /*height*/ 1,
         ));
-        let footer = view.footer_with_navigation(footer_area.width, motion, latest_navigation);
+        // Budget only badges that can actually paint, leaving the query at least nine
+        // cells. A pending or failed copy takes priority over a warning count.
+        let preliminary_composer = chat_widget.composer_gap_footer(footer_area.width);
+        let preliminary_transcript = view.gap_footer(footer_area.width, motion, latest_navigation);
+        let context_has_content = choose_gap_context(
+            preliminary_composer.as_ref(),
+            prompt_footer.as_ref(),
+            preliminary_transcript.as_ref(),
+        )
+        .is_some_and(|context| context.cursor_column.is_some() || context.text.width() > 0);
+        let mut badge_budget = footer_area.width.saturating_sub(9);
+        let copy_badge = (context_has_content && badge_budget >= 7)
+            .then(|| view.context_copy_notice(badge_budget.saturating_sub(1).min(18), now))
+            .flatten()
+            .filter(|line| line.width() > 0);
+        let copy_width = copy_badge
+            .as_ref()
+            .map_or(0, |line| line.width() as u16 + 1);
+        badge_budget = badge_budget.saturating_sub(copy_width);
+        let warning_badge = (badge_budget >= 4)
+            .then(|| chat_widget.composer_gap_warning(badge_budget.saturating_sub(1).min(40)))
+            .flatten();
+        let warning_width = warning_badge
+            .as_ref()
+            .map_or(0, |line| line.width() as u16 + 1);
+        let context_width = footer_area.width.saturating_sub(copy_width + warning_width);
+        let composer_context = chat_widget.composer_gap_footer(context_width);
+        let footer = if composer_gap.is_some() {
+            view.gap_footer(context_width, motion, latest_navigation)
+        } else {
+            view.footer_with_navigation(footer_area.width, motion, latest_navigation)
+        };
+        let selected_context = choose_gap_context(
+            composer_context.as_ref(),
+            prompt_footer.as_ref(),
+            footer.as_ref(),
+        );
         // Cap the whole composer (including padding and hints) at two-thirds of the screen,
         // but allow at least 8 rows on small screens, without exceeding the screen itself.
         let max_composer_height = ((u32::from(screen_size.height) * 2 / 3) as u16)
@@ -183,7 +211,7 @@ impl App {
         let bottom =
             chat_widget.bottom_pane_renderable(crate::bottom_pane::ComposerRenderOptions {
                 max_height: Some(max_composer_height),
-                footer: prompt_footer.as_ref().or(footer.as_ref()),
+                footer: selected_context,
                 command_popup_placement: if view.has_active_interaction() {
                     crate::bottom_pane::CommandPopupPlacement::Hidden
                 } else {
@@ -205,6 +233,8 @@ impl App {
         };
         drop(bottom);
         let available = screen_size.height.saturating_sub(bottom_height);
+        let selected_context_has_content = selected_context
+            .is_some_and(|context| context.text.lines.iter().any(|line| line.width() > 0));
         let mut bottom_area = Rect::new(
             /*x*/ 0,
             screen_size.height.saturating_sub(bottom_height),
@@ -234,16 +264,18 @@ impl App {
                 completion_tip,
             );
             if let Some(gap) = composer_gap.as_mut() {
-                gap.needs_separator = available > 1
+                gap.needs_separator = available > 2
                     // Keep the tip under the pointer when selection hints or copy feedback appear.
                     && turn_tip.is_none()
-                    && chat_widget.no_modal_or_popup_active()
-                    && view.composer_gap_has_content(transcript_width, composer_hint.as_ref(), now);
+                    && (chat_widget.no_modal_or_popup_active() || (composer_context.as_ref().is_some_and(|context| context.is_interactive) && !chat_widget.has_active_modal()))
+                    && (selected_context_has_content
+                        || warning_badge.is_some()
+                        || view.composer_gap_has_content(transcript_width, composer_hint.as_ref(), now));
             }
             // Rendering resolves whether new activity is still hidden. Paint that result in
             // this frame so a revision change cannot flash a stale activity hint.
-            let mut footer =
-                view.footer_with_navigation(footer_area.width, motion, latest_navigation);
+            let mut footer = if composer_gap.is_some() { view.gap_footer(context_width, motion, latest_navigation) }
+                else { view.footer_with_navigation(footer_area.width, motion, latest_navigation) };
             if let Some(footer) = prompt_footer
                 .as_mut()
                 .or(footer.as_mut())
@@ -251,14 +283,16 @@ impl App {
                 && let Some(items) = self
                     .key_chord_matcher
                     .pending_hint_items(&self.keymap.chords, footer_area.width)
+                && footer.cursor_column.is_none()
                 && let Some(progress) = footer.text.lines.last_mut()
             {
                 *progress = crate::bottom_pane::footer_hint_items_line(&items);
             }
+            let selected_context = choose_gap_context(composer_context.as_ref(), prompt_footer.as_ref(), footer.as_ref());
             let bottom =
                 chat_widget.bottom_pane_renderable(crate::bottom_pane::ComposerRenderOptions {
                     max_height: Some(max_composer_height),
-                    footer: prompt_footer.as_ref().or(footer.as_ref()),
+                    footer: selected_context,
                     command_popup_placement: if view.has_active_interaction() {
                         crate::bottom_pane::CommandPopupPlacement::Hidden
                     } else {
@@ -327,9 +361,36 @@ impl App {
                     )
                 })
             }
-            .filter(|_| chat_widget.no_modal_or_popup_active());
-            feedback_tick =
-                view.render_composer_gap(follow_area, composer_hint.as_ref(), frame.buffer, now);
+            .filter(|_| chat_widget.no_modal_or_popup_active() || (composer_context.as_ref().is_some_and(|context| context.is_interactive) && !chat_widget.has_active_modal()))
+            .filter(|area| !area.is_empty());
+            chat_widget.set_composer_gap_warning_area(None);
+            let mut gap_cursor = None;
+            if let Some(area) = follow_area {
+                let area = crate::bottom_pane::inset_footer_hint_area(area);
+                let mut right = area.right();
+                // Explicitly painted badges own their hit rectangles; neither queries nor stale
+                // footer geometry can accidentally open the warning list.
+                if let Some(badge) = &copy_badge {
+                    let width = badge.width() as u16;
+                    let target = Rect::new(right - width, area.y, width, 1);
+                    badge.clone().render(target, frame.buffer);
+                    right = target.x.saturating_sub(1);
+                }
+                if let Some(badge) = &warning_badge {
+                    let width = badge.width() as u16;
+                    let target = Rect::new(right - width, area.y, width, 1);
+                    badge.clone().render(target, frame.buffer);
+                    chat_widget.set_composer_gap_warning_area(Some(target));
+                    if selected_context.is_none_or(|context| !context.is_interactive) {
+                        chat_widget.rendered_selection.borrow_mut().register(target, false);
+                    }
+                    right = target.x.saturating_sub(1);
+                }
+                let content_area=Rect::new(area.x,area.y,right.saturating_sub(area.x),1);
+                (feedback_tick,gap_cursor)=view.render_context_gap(Some(content_area),composer_hint.as_ref(),selected_context,frame.buffer,now);
+            } else {
+                (feedback_tick,_) = view.render_context_gap(None,composer_hint.as_ref(),None,frame.buffer,now);
+            }
             if let Some((_, tip)) = &turn_tip
                 && let Some(area) = tip.rendered.get()
             {
@@ -343,27 +404,37 @@ impl App {
                 .borrow_mut()
                 .render(frame.buffer);
             chat_widget.note_rendered_width(screen_size.width);
+            if windows_enabled && let Some(feed) = feed {
+                // Keep input, gap feedback and the persistent status bar unobscured.
+                feed.render_windows(Rect::new(0, 0, screen_size.width, bottom_area.y), frame.buffer, &self.config.cwd);
+            }
             let dialog = chat_widget.centered_dialog();
             let (foreground, foreground_area): (&dyn Renderable, Rect) =
                 if let Some(dialog) = &dialog {
                     let area = Rect::new(
                         /*x*/ 0,
                         /*y*/ 0,
-                        screen_size.width,
-                        screen_size.height,
+                        physical_size.width,
+                        physical_size.height,
                     );
                     dialog.render(area, frame.buffer);
                     (dialog, area)
                 } else {
                     (&bottom, bottom_area)
                 };
-            rendered_cursor = foreground.cursor_pos(foreground_area);
+            rendered_cursor = if dialog.is_none() { gap_cursor.or_else(|| foreground.cursor_pos(foreground_area)) }
+                else { foreground.cursor_pos(foreground_area) };
             if let Some(position) = rendered_cursor {
                 frame.set_cursor_style(foreground.cursor_style(foreground_area));
                 frame.set_cursor_position(position);
             }
             if chat_widget.no_modal_or_popup_active() {
-                frame.transcript_images = view.image_placements();
+                let windows = if windows_enabled {
+                    feed.map(|feed| feed.window_areas()).unwrap_or_default()
+                } else { Vec::new() };
+                frame.transcript_images = view.image_placements().into_iter()
+                    .filter(|image| !windows.iter().any(|window| window.intersects(image.area)))
+                    .collect();
             }
         })?;
         if let Some((surface, tip)) = &turn_tip
@@ -747,3 +818,20 @@ mod warning_notice_tests;
 #[cfg(test)]
 #[path = "owned_transcript_follow_tests.rs"]
 mod follow_tests;
+
+fn choose_gap_context<'a>(
+    composer: Option<&'a crate::bottom_pane::TranscriptFooter>,
+    prompt: Option<&'a crate::bottom_pane::TranscriptFooter>,
+    transcript: Option<&'a crate::bottom_pane::TranscriptFooter>,
+) -> Option<&'a crate::bottom_pane::TranscriptFooter> {
+    composer
+        .filter(|context| context.is_interactive)
+        .or(prompt)
+        .or(transcript.filter(|context| context.is_interactive))
+        .or(composer)
+        .or(transcript)
+}
+
+#[cfg(test)]
+#[path = "owned_transcript_gap_tests.rs"]
+mod gap_tests;

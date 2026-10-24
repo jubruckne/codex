@@ -1,6 +1,5 @@
 ---
 source: tui/src/exec_cell/transcript_tests.rs
-assertion_line: 73
 expression: "format!(\"Rich\\n{rich}\\n\\nRaw\\n{}\", raw.join(\"\\n\"))"
 ---
 Rich
@@ -21,6 +20,7 @@ Raw
 $ cat first.txt
 first output
 ✓ • 5ms
+Inspecting the next file
 Interacted with background terminal: cat first.txt
 continue
 

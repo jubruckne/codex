@@ -72,12 +72,13 @@ async fn terminal_dynamic_activity_retains_calls_across_both_fallbacks() {
     assert_eq!(outputs[0], outputs[1]);
     insta::assert_snapshot!(
         lines_to_single_string(&outputs[0]),
-        @"
+        @r#"
         • Failed test.lookup · 25ms
-          └ Result for call-1
+          └ {"id":"call-1"}
+          └ Error: tool call failed (Ctrl+T for details)
         • Called test.lookup · 25ms
-          └ Result for call-2
-        "
+          └ {"id":"call-2"}
+        "#
     );
 }
 
@@ -169,4 +170,49 @@ async fn turn_finalization_drains_lifecycle_queue_before_interrupting_remaining_
     let mut buffer = Buffer::empty(area);
     Paragraph::new(lines).render(area, &mut buffer);
     insta::assert_snapshot!("interrupted_dynamic_activity", format!("{buffer:?}"));
+}
+
+#[tokio::test]
+async fn other_tool_dynamic_live_calls_render_once_and_complete_out_of_order() {
+    let (mut chat, mut events, _ops) = make_chatwidget_manual(None).await;
+    chat.local_settings.transcript_mode = TranscriptMode::Terminal;
+    chat.local_settings.tui.animations = false;
+    drain_insert_history(&mut events);
+    for id in ["first", "second"] {
+        chat.handle_dynamic_tool_item_now(dynamic_item(id, DynamicToolCallStatus::InProgress));
+    }
+    let retained = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(cell),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), 2);
+    let area = Rect::new(0, 0, 120, chat.desired_height(120));
+    let mut buffer = Buffer::empty(area);
+    chat.render(area, &mut buffer);
+    let rendered = buffer
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert_eq!(rendered.matches("Calling test.lookup").count(), 2);
+    assert_eq!(rendered.matches('◌').count(), 2);
+    chat.handle_dynamic_tool_item_now(dynamic_item("second", DynamicToolCallStatus::Completed));
+    chat.handle_dynamic_tool_item_now(dynamic_item("first", DynamicToolCallStatus::Failed));
+    assert!(drain_insert_history(&mut events).is_empty());
+    assert!(chat.transcript.dynamic_calls.is_empty());
+    for cell in retained {
+        assert!(
+            !cell
+                .display_lines(120)
+                .iter()
+                .any(|line| line.to_string().contains("Result for"))
+        );
+        assert!(
+            cell.raw_lines()
+                .iter()
+                .any(|line| line.to_string().contains("Result for"))
+        );
+    }
 }

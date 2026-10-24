@@ -5,7 +5,7 @@ use std::time::Instant;
 use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
-use crate::exec_command::strip_bash_lc_and_escape;
+use super::native::command_highlights;
 use crate::history_cell::ActivityDisclosure;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::HistoryRenderMode;
@@ -13,7 +13,6 @@ use crate::history_cell::plain_lines;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
 use crate::motion::activity_indicator;
-use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::line_utils::line_to_static;
 use crate::style::accent_color;
 use crate::terminal_hyperlinks::HyperlinkLine;
@@ -235,10 +234,13 @@ impl HistoryCell for ExecCell {
     }
 
     fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        if self.native_presentation {
+            return self.display_hyperlink_lines(width);
+        }
         if self.group.calls.iter().any(ExecCall::is_user_shell_command) {
             return self.display_hyperlink_lines(width);
         }
-        if self.is_exploring_cell() {
+        let mut lines = if self.is_exploring_cell() {
             let mut lines = self.exploring_display_lines(width);
             lines.truncate(1 + crate::history_cell::activity_preview::DETAIL_PREVIEW_LINES);
             let nonzero_exits = self
@@ -269,7 +271,9 @@ impl HistoryCell for ExecCell {
                 .collect()
         } else {
             self.compact_command_lines(width)
-        }
+        };
+        lines.extend(self.group.details.visible_lines(width));
+        lines
     }
 
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -277,11 +281,16 @@ impl HistoryCell for ExecCell {
     }
 
     fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        if self.is_exploring_cell() {
+        if self.native_presentation {
+            return self.native_command_lines(width);
+        }
+        let mut lines = if self.is_exploring_cell() {
             self.exploring_display_lines(width)
         } else {
             self.command_display_lines(width)
-        }
+        };
+        lines.extend(self.group.details.visible_lines(width));
+        lines
     }
 
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -296,6 +305,37 @@ impl HistoryCell for ExecCell {
         self.iter_calls()
             .map(|call| format!("exec:{}", call.call_id))
             .collect()
+    }
+
+    fn display_lines_for_mode(&self, width: u16, mode: HistoryRenderMode) -> Vec<Line<'static>> {
+        match mode {
+            HistoryRenderMode::Rich => self.display_lines(width),
+            HistoryRenderMode::Raw if self.native_presentation => {
+                plain_lines(self.display_lines(width))
+            }
+            HistoryRenderMode::Raw => self.live_raw_lines(),
+        }
+    }
+
+    fn display_hyperlink_lines_for_mode(
+        &self,
+        width: u16,
+        mode: HistoryRenderMode,
+    ) -> Vec<HyperlinkLine> {
+        match mode {
+            HistoryRenderMode::Rich => self.display_hyperlink_lines(width),
+            HistoryRenderMode::Raw => {
+                plain_hyperlink_lines(self.display_lines_for_mode(width, mode))
+            }
+        }
+    }
+
+    fn live_raw_lines(&self) -> Vec<Line<'static>> {
+        if self.native_presentation {
+            plain_lines(self.display_lines(u16::MAX))
+        } else {
+            self.raw_lines()
+        }
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -461,9 +501,7 @@ impl ExecCell {
             panic!("Expected exactly one call in a command display cell");
         };
         let layout = EXEC_DISPLAY_LAYOUT;
-        let success = call
-            .duration
-            .and_then(|_| call.output.as_ref().map(|o| o.exit_code == 0));
+        let success = call.duration.map(|_| !self.command_failed(call));
         let bullet = match success {
             Some(true) => "•".green().bold(),
             Some(false) => "•".red().bold(),
@@ -491,9 +529,10 @@ impl ExecCell {
         let cmd_display = if call.is_unified_exec_interaction() {
             format_unified_exec_interaction(&call.command, call.interaction_input.as_deref())
         } else {
-            strip_bash_lc_and_escape(&call.command)
+            self.original_command(call).into_owned()
         };
-        let highlighted_lines = highlight_bash_to_lines(&cmd_display);
+        let mut highlighted_lines = command_highlights(&cmd_display);
+        self.append_command_metadata(call, &mut highlighted_lines);
 
         let continuation_wrap_width = layout.command_continuation.wrap_width(width);
         let continuation_opts =
@@ -544,11 +583,13 @@ impl ExecCell {
 
         let mut lines: Vec<HyperlinkLine> = vec![header];
 
-        let mut hidden_details = continuation_lines.len() > layout.command_continuation_max_lines;
-        let continuation_lines = Self::limit_lines_from_start(
-            &continuation_lines,
-            layout.command_continuation_max_lines,
-        );
+        let command_limit = if call.is_user_shell_command() {
+            layout.command_continuation_max_lines
+        } else {
+            usize::MAX
+        };
+        let mut hidden_details = continuation_lines.len() > command_limit;
+        let continuation_lines = Self::limit_lines_from_start(&continuation_lines, command_limit);
         if !continuation_lines.is_empty() {
             lines.extend(prefix_hyperlink_lines(
                 continuation_lines,
@@ -558,6 +599,13 @@ impl ExecCell {
         }
 
         if let Some(output) = call.output.as_ref() {
+            if Self::suppress_completed_output(call) {
+                hidden_details |= output.line_counts().1 > 0;
+                return CommandDisplay {
+                    lines,
+                    hidden_details,
+                };
+            }
             if !call.is_user_shell_command() {
                 let preview = output_preview_lines(output, layout.output_block.wrap_width(width));
                 let preview = if preview.is_empty() && !call.is_unified_exec_interaction() {

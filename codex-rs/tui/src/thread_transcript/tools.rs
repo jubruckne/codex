@@ -118,6 +118,8 @@ fn replay_command_args(command: &str) -> Option<Vec<String>> {
 }
 
 pub(crate) struct CommandHistory {
+    original_command: String,
+    reported_exit_code: Option<i32>,
     pub(crate) id: String,
     pub(crate) command: Vec<String>,
     pub(crate) parsed: Vec<ParsedCommand>,
@@ -128,6 +130,21 @@ pub(crate) struct CommandHistory {
 }
 
 impl CommandHistory {
+    /// Native presentation can retain a noncanonical command verbatim as a shell script.
+    /// The wrapper is presentation data only; nothing executes it.
+    pub(crate) fn from_native_item(mut item: ThreadItem) -> Option<Self> {
+        if let ThreadItem::CommandExecution { command, .. } = &mut item
+            && replay_command_args(command).is_none()
+        {
+            *command = codex_shell_command::parse_command::shlex_join(&[
+                "sh".into(),
+                "-c".into(),
+                command.clone(),
+            ]);
+        }
+        Self::from_item(item)
+    }
+
     pub(crate) fn from_item(item: ThreadItem) -> Option<Self> {
         let ThreadItem::CommandExecution {
             id,
@@ -147,6 +164,7 @@ impl CommandHistory {
         if source == CommandExecutionSource::UnifiedExecInteraction {
             return None;
         }
+        let reported_exit_code = exit_code;
         let exit_code = match status {
             CommandExecutionStatus::InProgress | CommandExecutionStatus::Declined => return None,
             CommandExecutionStatus::Completed => exit_code.unwrap_or_default(),
@@ -156,6 +174,8 @@ impl CommandHistory {
         };
         Some(Self {
             id,
+            original_command: command.clone(),
+            reported_exit_code,
             command: replay_command_args(&command)?,
             parsed: command_actions
                 .into_iter()
@@ -178,6 +198,8 @@ impl CommandHistory {
             /*interaction_input*/ None,
             /*animations_enabled*/ false,
         );
+        cell.remember_original_command(&self.id, &self.original_command);
+        cell.remember_exit_code(&self.id, self.reported_exit_code);
         let completed = cell.complete_call(&self.id, output, self.duration);
         debug_assert!(completed, "new exec cell should contain {}", self.id);
         cell

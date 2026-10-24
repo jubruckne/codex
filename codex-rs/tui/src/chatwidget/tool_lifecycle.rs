@@ -208,6 +208,18 @@ impl ChatWidget {
             invocation,
             self.local_settings.tui.animations && self.local_settings.tui.effects.progress,
         )));
+        if let Some(cell) = self
+            .transcript
+            .active_cell
+            .as_mut()
+            .and_then(|cell| cell.as_any_mut().downcast_mut::<McpToolCallCell>())
+        {
+            cell.configure_native(
+                !self.local_settings.transcript_mode.is_owned(),
+                Some(self.frame_requester.clone()),
+                false,
+            );
+        }
         self.bump_active_cell_revision();
         self.request_redraw();
     }

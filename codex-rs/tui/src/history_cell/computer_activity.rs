@@ -1,6 +1,6 @@
 //! Compact adjacent computer calls without discarding their chronological transcript details.
 //!
-//! CUA calls and intervening transcript-only reasoning share this cell. Visible history items
+//! CUA calls and intervening reasoning summaries share this cell. Other visible history items
 //! and turn boundaries end the group.
 //! Preview selection favors failures and images, but never changes the order of retained rows.
 
@@ -129,7 +129,7 @@ impl HistoryCell for ComputerActivityCell {
     }
 
     fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        let mut lines = self.display_lines(width);
+        let mut lines = self.activity_display_lines(width);
         if width > 0 && !self.is_active() && self.group.calls.len() > 3 {
             // The owned transcript supplies the shared disclosure control. Legacy history keeps
             // its built-in summary, which is the final row whenever completed calls are hidden.
@@ -140,10 +140,54 @@ impl HistoryCell for ComputerActivityCell {
                 *prefix = "  └ ".dim();
             }
         }
-        plain_hyperlink_lines(lines)
+        let mut lines = plain_hyperlink_lines(lines);
+        lines.extend(self.group.details.visible_lines(width));
+        lines
     }
 
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        visible_lines(self.display_hyperlink_lines(width))
+    }
+
+    fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        let mut lines = plain_hyperlink_lines(self.activity_display_lines(width));
+        lines.extend(self.group.details.visible_lines(width));
+        lines
+    }
+
+    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        visible_lines(self.transcript_hyperlink_lines(width))
+    }
+
+    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.detailed_hyperlink_lines(width, HistoryRenderMode::Rich)
+    }
+
+    fn activity_ids(&self) -> Vec<String> {
+        self.call_ids().map(|id| format!("mcp:{id}")).collect()
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        plain_lines(visible_lines(
+            self.detailed_hyperlink_lines(u16::MAX, HistoryRenderMode::Raw),
+        ))
+    }
+
+    fn transcript_animation_tick(&self) -> Option<u64> {
+        self.group
+            .calls
+            .iter()
+            .filter_map(HistoryCell::transcript_animation_tick)
+            .max()
+    }
+}
+
+#[cfg(test)]
+#[path = "computer_activity_tests.rs"]
+mod tests;
+
+impl ComputerActivityCell {
+    fn activity_display_lines(&self, width: u16) -> Vec<Line<'static>> {
         if width == 0 {
             return Vec::new();
         }
@@ -251,34 +295,4 @@ impl HistoryCell for ComputerActivityCell {
         }
         lines
     }
-
-    fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
-        visible_lines(self.transcript_hyperlink_lines(width))
-    }
-
-    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-        self.detailed_hyperlink_lines(width, HistoryRenderMode::Rich)
-    }
-
-    fn activity_ids(&self) -> Vec<String> {
-        self.call_ids().map(|id| format!("mcp:{id}")).collect()
-    }
-
-    fn raw_lines(&self) -> Vec<Line<'static>> {
-        plain_lines(visible_lines(
-            self.detailed_hyperlink_lines(u16::MAX, HistoryRenderMode::Raw),
-        ))
-    }
-
-    fn transcript_animation_tick(&self) -> Option<u64> {
-        self.group
-            .calls
-            .iter()
-            .filter_map(HistoryCell::transcript_animation_tick)
-            .max()
-    }
 }
-
-#[cfg(test)]
-#[path = "computer_activity_tests.rs"]
-mod tests;

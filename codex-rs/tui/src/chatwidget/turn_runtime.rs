@@ -32,6 +32,12 @@ impl ChatWidget {
     /// The bottom pane only has one running flag, but this module treats it as a derived state of
     /// both the agent turn lifecycle and MCP startup lifecycle.
     pub(super) fn update_task_running_state(&mut self) {
+        self.bottom_pane.set_turn_tokens(
+            self.turn_lifecycle
+                .agent_turn_running
+                .then(|| self.status_state.turn_tokens.counts())
+                .flatten(),
+        );
         self.bottom_pane.set_task_running(
             self.turn_lifecycle.agent_turn_running
                 || self.review.is_review_mode
@@ -104,6 +110,7 @@ impl ChatWidget {
         if self.mcp_startup_status.is_none() || !self.status_header_is_mcp_startup_owned() {
             self.set_status_header(String::from("Working"));
         }
+        self.status_state.live_reasoning = None;
         self.reasoning_summary_parts.clear();
         self.reasoning_buffer.clear();
         self.reasoning_header = None;
@@ -132,7 +139,9 @@ impl ChatWidget {
         completion: Option<history_cell::FinalMessageSeparator>,
         from_replay: bool,
     ) {
-        if self.status_state.reasoning_resume_turn_id.is_some() {
+        if self.status_state.live_reasoning.is_some()
+            || self.status_state.reasoning_resume_turn_id.is_some()
+        {
             self.on_agent_reasoning_final();
         }
         self.input_queue.submit_pending_steers_after_interrupt = false;
@@ -333,7 +342,11 @@ impl ChatWidget {
         self.flush_answer_and_plan_streams();
         self.flush_interrupt_activity();
         self.finish_dynamic_activity();
-        if self.status_state.reasoning_resume_turn_id.is_some() {
+        self.clear_active_stream_tail();
+        self.finalize_active_cell_as_failed();
+        if self.status_state.live_reasoning.is_some()
+            || self.status_state.reasoning_resume_turn_id.is_some()
+        {
             self.on_agent_reasoning_final();
         }
         self.status_state.reasoning_item_id = None;
@@ -344,8 +357,7 @@ impl ChatWidget {
         // Drop preview-only stream tail content on any termination path before
         // failed-cell finalization, so transient tail cells are never persisted.
         self.clear_active_stream_tail();
-        // Ensure any spinner is replaced by a red ✗ and flushed into history.
-        self.finalize_active_cell_as_failed();
+
         // Turn-scoped hook rows are transient live state; once the turn is over,
         // do not leave an orphaned running row behind if no matching completion
         // event arrived before cancellation.

@@ -95,13 +95,13 @@ async fn completion_follows_plain_and_streamed_tool_answers() {
 #[tokio::test]
 async fn completion_live_shows_known_durations_and_preserves_timestamp_fallback() {
     for (duration_ms, completed_at, prefix) in [
-        (598, Some(COMPLETED_AT), "Worked for <1s • "),
-        (1_000, Some(COMPLETED_AT), "Worked for 1s • "),
-        (60_000, Some(COMPLETED_AT), "Worked for 1m 0s • "),
-        (60_999, Some(COMPLETED_AT), "Worked for 1m 0s • "),
-        (61_000, Some(COMPLETED_AT), "Worked for 1m 1s • "),
-        (125_000, Some(COMPLETED_AT), "Worked for 2m 5s • "),
-        (1_000, None, "Worked for 1s • "),
+        (598, Some(COMPLETED_AT), "Worked for <1s · "),
+        (1_000, Some(COMPLETED_AT), "Worked for 1s · "),
+        (60_000, Some(COMPLETED_AT), "Worked for 1m 0s · "),
+        (60_999, Some(COMPLETED_AT), "Worked for 1m 0s · "),
+        (61_000, Some(COMPLETED_AT), "Worked for 1m 1s · "),
+        (125_000, Some(COMPLETED_AT), "Worked for 2m 5s · "),
+        (1_000, None, "Worked for 1s · "),
     ] {
         let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
         handle_turn_started(&mut chat, "turn-1");
@@ -131,24 +131,24 @@ async fn completion_replay_preserves_metadata_and_input_without_live_side_effect
         (
             Some(125_000),
             Some(COMPLETED_AT),
-            format!("Worked for 2m 5s • {done}"),
+            format!("Worked for 2m 5s · {done}"),
         ),
         (None, None, String::new()),
         (None, Some(COMPLETED_AT), done.clone()),
         (
             Some(598),
             Some(COMPLETED_AT),
-            format!("Worked for <1s • {done}"),
+            format!("Worked for <1s · {done}"),
         ),
         (
             Some(60_000),
             Some(COMPLETED_AT),
-            format!("Worked for 1m 0s • {done}"),
+            format!("Worked for 1m 0s · {done}"),
         ),
         (
             Some(61_000),
             Some(COMPLETED_AT),
-            format!("Worked for 1m 1s • {done}"),
+            format!("Worked for 1m 1s · {done}"),
         ),
         (Some(60_000), None, "Worked for 1m 0s".to_string()),
         (Some(125_000), None, "Worked for 2m 5s".to_string()),
@@ -201,7 +201,7 @@ async fn completion_replay_waits_for_older_turn_items_to_load() {
     chat.replay_thread_turns(vec![unloaded, newer], ReplayKind::ResumeInitialMessages);
     assert_eq!(
         completion_labels(&mut rx),
-        format!("Worked for 1s • {}", saved_completion_label())
+        format!("Worked for 1s · {}", saved_completion_label())
     );
 
     chat.replay_thread_turns(vec![older], ReplayKind::ThreadSnapshot);
@@ -215,7 +215,7 @@ async fn completion_replay_waits_for_older_turn_items_to_load() {
         .to_string();
     assert_eq!(
         completion_labels(&mut rx),
-        format!("Worked for 2m 5s • {older_time}"),
+        format!("Worked for 2m 5s · {older_time}"),
     );
 }
 
@@ -277,7 +277,120 @@ fn completion_snapshot_normalization_preserves_clock_only_message_lines() {
                 &footer,
                 lines_to_single_string(&footer.display_lines(/*width*/ 80))
             ),
-            "  Worked for [duration] • [completion time]\n"
+            "  Worked for [duration] · [completion time]\n"
         );
     }
+}
+
+#[tokio::test]
+async fn shell_grouping_footer_captures_usage_before_next_turn_and_restores_cache() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(None).await;
+    handle_turn_started(&mut chat, "turn-1");
+    chat.status_state.turn_tokens.observe("turn-1", 500, 128);
+    chat.status_state
+        .turn_tokens
+        .observe("turn-1", 12_400, 2_100);
+    chat.status_state
+        .turn_tokens
+        .observe("turn-1", 12_400, 2_100);
+    let cell = chat
+        .completion_cell(&completed_turn(Some(18_000), Some(COMPLETED_AT)), None)
+        .unwrap();
+    let label = cell.raw_lines()[0].to_string();
+    assert!(label.contains("Worked for 18s · ↑ 12.4k ↓ 2.1k ·"));
+    handle_turn_started(&mut chat, "turn-2");
+    chat.status_state
+        .turn_tokens
+        .observe("turn-2", 12_900, 2_228);
+    assert_eq!(cell.raw_lines()[0].to_string(), label);
+    let (mut restored, _rx, _ops) = make_chatwidget_manual(None).await;
+    restored.restore_turn_tokens(chat.status_state.turn_tokens.clone());
+    let replay = restored
+        .completion_cell(
+            &completed_turn(Some(18_000), Some(COMPLETED_AT)),
+            Some(ReplayKind::ResumeInitialMessages),
+        )
+        .unwrap();
+    assert!(replay.raw_lines()[0].to_string().contains("12.4k"));
+}
+
+#[tokio::test]
+async fn shell_grouping_live_commands_flush_at_visible_and_turn_boundaries() {
+    for boundary in ["user", "assistant", "non-shell", "turn"] {
+        let (mut chat, mut events, _ops) = make_chatwidget_manual(None).await;
+        chat.local_settings.transcript_mode = crate::transcript_mode::TranscriptMode::Terminal;
+        handle_turn_started(&mut chat, "turn-1");
+        drain_insert_history(&mut events);
+        let first = begin_exec(&mut chat, "first", "echo first");
+        let second = begin_exec(&mut chat, "second", "echo second");
+        assert_eq!(
+            chat.transcript.active_cell.as_ref().unwrap().activity_ids(),
+            ["exec:first", "exec:second"]
+        );
+        end_exec(&mut chat, first, "first output", "", 0);
+        end_exec(&mut chat, second, "second output", "", 0);
+        let grouped = drain_insert_history(&mut events);
+        assert_eq!(grouped.len(), 1);
+        assert!(lines_to_single_string(&grouped[0]).starts_with("• Ran\n"));
+        let _before = begin_exec(&mut chat, "before", "echo before");
+        if boundary == "turn" {
+            handle_turn_started(&mut chat, "turn-2");
+        } else {
+            chat.add_to_history(history_cell::PlainHistoryCell::new(vec![boundary.into()]));
+        }
+        let _after = begin_exec(&mut chat, "after", "echo after");
+        assert_eq!(
+            chat.transcript.active_cell.as_ref().unwrap().activity_ids(),
+            ["exec:after"]
+        );
+        assert!(!drain_insert_history(&mut events).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn context_growth_footer_reads_live_usage_and_restores_completed_turns() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+    let report = |chat: &mut ChatWidget, id: &str, input: i64, output: i64, context: i64| {
+        let total = codex_app_server_protocol::TokenUsageBreakdown {
+            total_tokens: input + output,
+            input_tokens: input,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: output,
+            reasoning_output_tokens: 0,
+        };
+        let mut last = total.clone();
+        last.total_tokens = context;
+        chat.handle_server_notification(
+            ServerNotification::ThreadTokenUsageUpdated(
+                codex_app_server_protocol::ThreadTokenUsageUpdatedNotification {
+                    thread_id: chat.thread_id.map(|id| id.to_string()).unwrap_or_default(),
+                    turn_id: id.to_owned(),
+                    token_usage: codex_app_server_protocol::ThreadTokenUsage {
+                        total,
+                        last,
+                        model_context_window: None,
+                    },
+                },
+            ),
+            None,
+        );
+    };
+    handle_turn_started(&mut chat, "turn-1");
+    report(&mut chat, "turn-1", 40_000, 1_000, 21_000);
+    complete_turn(&mut chat, completed_turn(Some(8_000), Some(COMPLETED_AT)));
+    assert!(!completion_labels(&mut rx).contains("context"));
+    handle_turn_started(&mut chat, "turn-2");
+    report(&mut chat, "turn-2", 314_300, 1_138, 24_200);
+    let mut second = completed_turn(Some(8_000), Some(COMPLETED_AT));
+    second.id = "turn-2".to_owned();
+    complete_turn(&mut chat, second.clone());
+    let label = completion_labels(&mut rx);
+    assert!(label.contains("↑ 274.3k ↓ 138 · context +3.2k ·"), "{label}");
+    handle_turn_started(&mut chat, "turn-3");
+    report(&mut chat, "turn-3", 400_000, 2_000, 10_000);
+    let (mut restored, _rx, _ops) = make_chatwidget_manual(None).await;
+    restored.restore_turn_tokens(chat.status_state.turn_tokens.clone());
+    let replay = restored.completion_cell(&second, Some(ReplayKind::ResumeInitialMessages)).unwrap();
+    assert_eq!(replay.raw_lines()[0].to_string(), label);
 }
