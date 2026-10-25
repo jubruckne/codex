@@ -1,42 +1,31 @@
-//! Floating subagent geometry and pointer capture, independent of agent/model activity.
-//! Hidden agents retain session geometry, while only painted windows can receive input.
-
+//! A shared floating subagent window, with independently collapsible sections.
 use super::*;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Position;
+use ratatui::widgets::{Block, BorderType};
 
-const DEFAULT_HEIGHT: u16 = cards::CARD_HEIGHT;
 const MIN_WIDTH: u16 = 20;
 const MIN_HEIGHT: u16 = 6;
 const COLLAPSED_HEIGHT: u16 = 3;
 
 #[derive(Default)]
 pub(super) struct Windows {
-    states: HashMap<ThreadId, Window>,
+    window: Option<Window>,
+    sections: HashMap<ThreadId, Section>,
     order: Vec<ThreadId>,
+    painted: Vec<(ThreadId, Rect)>,
     viewport: Rect,
     animation_started: Option<Instant>,
     gesture: Option<Gesture>,
+    scroll: u16,
+    max_scroll: u16,
+    manually_sized: bool,
 }
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 struct Window {
-    // Expanded geometry survives collapse; display geometry uses only three rows.
     rect: Rect,
-    collapsed: bool,
-    awaiting_text: bool,
 }
 impl Window {
-    fn displayed(self) -> Rect {
-        Rect {
-            height: if self.collapsed {
-                COLLAPSED_HEIGHT
-            } else {
-                self.rect.height
-            },
-            ..self.rect
-        }
-    }
     fn clamp(&mut self, area: Rect) {
         self.rect.width = self.rect.width.clamp(MIN_WIDTH.min(area.width), area.width);
         self.rect.height = self
@@ -47,13 +36,16 @@ impl Window {
             .rect
             .x
             .clamp(area.x, area.right().saturating_sub(self.rect.width));
-        self.rect.y = self.rect.y.clamp(
-            area.y,
-            area.bottom().saturating_sub(self.displayed().height),
-        );
+        self.rect.y = self
+            .rect
+            .y
+            .clamp(area.y, area.bottom().saturating_sub(self.rect.height));
     }
 }
-
+struct Section {
+    collapsed: bool,
+    awaiting_text: bool,
+}
 #[derive(Clone, Copy)]
 struct Edges {
     left: bool,
@@ -64,119 +56,72 @@ struct Edges {
 enum GestureKind {
     Move,
     Resize(Edges),
-    Toggle,
+    Capture,
 }
 #[derive(Clone, Copy)]
 struct Gesture {
-    agent: ThreadId,
     origin: Position,
     rect: Rect,
     kind: GestureKind,
 }
 
 impl Windows {
-    #[cfg(test)]
-    fn sync(&mut self, area: Rect, agents: &[ThreadId]) {
-        self.sync_ready(area, agents, &agents.iter().copied().collect());
-    }
-
     fn sync_ready(&mut self, area: Rect, agents: &[ThreadId], ready: &HashSet<ThreadId>) {
         if self.viewport != area {
             self.gesture = None;
         }
         self.viewport = area;
-        self.order.retain(|id| agents.contains(id));
-        if self
-            .gesture
-            .is_some_and(|gesture| !self.order.contains(&gesture.agent))
-        {
-            self.gesture = None;
-        }
-        if area.width < 8 || area.height < COLLAPSED_HEIGHT {
+        self.order = agents.to_vec();
+        self.painted.clear();
+        if agents.is_empty() || area.width < 8 || area.height < COLLAPSED_HEIGHT {
             self.order.clear();
             self.gesture = None;
             return;
         }
         for id in agents {
-            if let Some(window) = self.states.get_mut(id) {
-                if window.awaiting_text && ready.contains(id) {
-                    window.collapsed = false;
-                    window.awaiting_text = false;
-                }
-                window.clamp(area);
-            }
-        }
-        let mut occupied: Vec<_> = agents
-            .iter()
-            .filter_map(|id| self.states.get(id))
-            .map(|window| window.displayed())
-            .collect();
-        for (index, id) in agents.iter().enumerate() {
-            self.states.entry(*id).or_insert_with(|| {
-                let width = (area.width / 4).max(30).saturating_add(8).min(area.width);
-                let height = DEFAULT_HEIGHT.min(area.height);
-                let rows = (area.height / height).max(1);
-                let columns = (area.width / width).max(1);
-                let capacity = usize::from(rows) * usize::from(columns);
-                let tile = |index: usize| {
-                    let slot = index % capacity;
-                    let column = slot / usize::from(rows);
-                    let row = slot % usize::from(rows);
-                    // Overflow cascades slightly, leaving earlier title bars reachable.
-                    let cascade = (index / capacity) as u16;
-                    let x = area
-                        .right()
-                        .saturating_sub((column as u16 + 1) * width)
-                        .saturating_sub(cascade.saturating_mul(2))
-                        .max(area.x);
-                    let y = area
-                        .y
-                        .saturating_add(row as u16 * height)
-                        .saturating_add(cascade)
-                        .min(area.bottom().saturating_sub(height));
-                    Rect::new(x, y, width, height)
-                };
-                let rect = (0..capacity)
-                    .map(tile)
-                    .find(|candidate| {
-                        occupied.iter().all(|used| {
-                            candidate.right() <= used.x
-                                || used.right() <= candidate.x
-                                || candidate.bottom() <= used.y
-                                || used.bottom() <= candidate.y
-                        })
-                    })
-                    .unwrap_or_else(|| tile(index + capacity));
-                occupied.push(rect);
-                Window {
-                    rect,
-                    collapsed: !ready.contains(id),
-                    awaiting_text: !ready.contains(id),
-                }
+            let section = self.sections.entry(*id).or_insert(Section {
+                collapsed: !ready.contains(id),
+                awaiting_text: !ready.contains(id),
             });
-            if !self.order.contains(id) {
-                self.order.push(*id);
+            if section.awaiting_text && ready.contains(id) {
+                section.collapsed = false;
+                section.awaiting_text = false;
             }
-            self.states.get_mut(id).unwrap().clamp(area);
+        }
+        let content_height = agents.iter().fold(0u16, |height, id| {
+            height.saturating_add(self.section_height(*id))
+        });
+        let window = self.window.get_or_insert_with(|| {
+            let width = (area.width / 4).max(30).saturating_add(8).min(area.width);
+            Window {
+                rect: Rect::new(
+                    area.right() - width,
+                    area.y,
+                    width,
+                    content_height.saturating_add(2).min(area.height),
+                ),
+            }
+        });
+        if !self.manually_sized {
+            window.rect.height = content_height.saturating_add(2).min(area.height);
+        }
+        window.clamp(area);
+        self.max_scroll = content_height.saturating_sub(window.rect.height.saturating_sub(2));
+        self.scroll = self.scroll.min(self.max_scroll);
+    }
+    fn section_height(&self, id: ThreadId) -> u16 {
+        if self.sections[&id].collapsed {
+            COLLAPSED_HEIGHT
+        } else {
+            cards::CARD_HEIGHT
         }
     }
-
-    fn hit(&self, position: Position) -> Option<ThreadId> {
-        self.order
-            .iter()
-            .rev()
-            .copied()
-            .find(|id| self.states[id].displayed().contains(position))
-    }
-
     fn mouse(&mut self, mouse: &MouseEvent) -> bool {
         let position = Position::new(mouse.column, mouse.row);
         if let Some(gesture) = self.gesture {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
-                    if !matches!(gesture.kind, GestureKind::Toggle) {
-                        self.update_gesture(gesture, position);
-                    }
+                    self.update_gesture(gesture, position);
                     if matches!(mouse.kind, MouseEventKind::Up(_)) {
                         self.gesture = None;
                     }
@@ -186,48 +131,58 @@ impl Windows {
                 _ => return true,
             }
         }
-        let Some(id) = self.hit(position) else {
+        let Some(window) = self
+            .window
+            .filter(|window| !self.order.is_empty() && window.rect.contains(position))
+        else {
             return false;
         };
-        if matches!(mouse.kind, MouseEventKind::Down(_)) {
-            self.order.retain(|agent| *agent != id);
-            self.order.push(id);
-        }
-        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-            let window = self.states.get_mut(&id).unwrap();
-            let rect = window.displayed();
-            let kind = if position.y == rect.y && position.x == rect.right().saturating_sub(3) {
-                window.collapsed = !window.collapsed;
-                window.awaiting_text = false;
-                window.clamp(self.viewport);
-                GestureKind::Toggle
-            } else {
-                let edges = Edges {
-                    left: position.x == rect.x,
-                    right: position.x == rect.right() - 1,
-                    bottom: !window.collapsed && position.y == rect.bottom() - 1,
-                };
-                if edges.left || edges.right || edges.bottom {
-                    GestureKind::Resize(edges)
-                } else if position.y == rect.y {
-                    GestureKind::Move
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                self.scroll = self.scroll.saturating_add(3).min(self.max_scroll)
+            }
+            MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_sub(3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let rect = window.rect;
+                let toggle = self
+                    .painted
+                    .iter()
+                    .find(|(_, header)| {
+                        header.contains(position) && position.x == rect.right().saturating_sub(3)
+                    })
+                    .map(|(id, _)| *id);
+                let kind = if let Some(id) = toggle {
+                    let section = self.sections.get_mut(&id).unwrap();
+                    section.collapsed = !section.collapsed;
+                    section.awaiting_text = false;
+                    GestureKind::Capture
                 } else {
-                    // Capture a body click through release without starting a drag.
-                    GestureKind::Toggle
-                }
-            };
-            self.gesture = Some(Gesture {
-                agent: id,
-                origin: position,
-                rect: window.rect,
-                kind,
-            });
+                    let edges = Edges {
+                        left: position.x == rect.x,
+                        right: position.x == rect.right() - 1,
+                        bottom: position.y == rect.bottom() - 1,
+                    };
+                    if edges.left || edges.right || edges.bottom {
+                        self.manually_sized = true;
+                        GestureKind::Resize(edges)
+                    } else if position.y == rect.y {
+                        GestureKind::Move
+                    } else {
+                        GestureKind::Capture
+                    }
+                };
+                self.gesture = Some(Gesture {
+                    origin: position,
+                    rect,
+                    kind,
+                });
+            }
+            _ => {}
         }
         true
     }
-
     fn update_gesture(&mut self, gesture: Gesture, position: Position) {
-        let Some(window) = self.states.get_mut(&gesture.agent) else {
+        let Some(window) = self.window.as_mut() else {
             return;
         };
         let dx = i32::from(position.x) - i32::from(gesture.origin.x);
@@ -240,11 +195,7 @@ impl Windows {
                     i32::from(area.x),
                     i32::from(area.right().saturating_sub(original.width)),
                 ) as u16;
-                let height = if window.collapsed {
-                    COLLAPSED_HEIGHT
-                } else {
-                    original.height
-                };
+                let height = original.height;
                 window.rect.y = (i32::from(original.y) + dy).clamp(
                     i32::from(area.y),
                     i32::from(area.bottom().saturating_sub(height)),
@@ -272,7 +223,7 @@ impl Windows {
                         as u16;
                 }
             }
-            GestureKind::Toggle => {}
+            GestureKind::Capture => {}
         }
         window.clamp(area);
     }
@@ -286,6 +237,8 @@ impl RootFeed {
         cwd: &Path,
         animation: Option<(&crate::tui::FrameRequester, crate::motion::MotionMode)>,
     ) {
+        // A resize can arrive before the terminal's backing buffer catches up.
+        let area = area.intersection(buf.area);
         let now = chrono::Utc::now().timestamp();
         let mut agents: Vec<_> = self
             .agents
@@ -312,22 +265,15 @@ impl RootFeed {
                 }
             })
             .collect();
-        let (layout, started) = {
-            let mut windows = self.windows_ui.borrow_mut();
-            let started = *windows.animation_started.get_or_insert_with(Instant::now);
-            windows.sync_ready(area, &agents, &ready);
-            (
-                windows
-                    .order
-                    .iter()
-                    .map(|id| (*id, windows.states[id]))
-                    .collect::<Vec<_>>(),
-                started,
-            )
-        };
+        let mut windows = self.windows_ui.borrow_mut();
+        windows.sync_ready(area, &agents, &ready);
+        if windows.order.is_empty() {
+            return;
+        }
+        let started = *windows.animation_started.get_or_insert_with(Instant::now);
         let activity = animation
             .filter(|_| {
-                layout.iter().any(|(id, _)| {
+                agents.iter().any(|id| {
                     self.cards
                         .get(id)
                         .is_some_and(|state| state.label() == "Working")
@@ -336,50 +282,77 @@ impl RootFeed {
             .map(|(requester, progress)| {
                 crate::motion::loading_glyph(started, progress, requester)
             });
-        for (id, window) in layout {
-            self.render_agent_card_with_activity(
-                id,
-                window.displayed(),
-                window.collapsed,
-                buf,
-                cwd,
-                activity,
-            );
+        let rect = windows.window.unwrap().rect;
+        ratatui::widgets::Clear.render(rect, buf);
+        let title = format!(" Subagents ({}) ", agents.len());
+        let mut border = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .title(title);
+        if windows.max_scroll > 0 {
+            border = border.title_bottom(" Scroll ↕ ");
+        }
+        border.render(rect, buf);
+        let inner = Rect::new(
+            rect.x + 1,
+            rect.y + 1,
+            rect.width.saturating_sub(2),
+            rect.height.saturating_sub(2),
+        );
+        let mut offset = 0u16;
+        for id in agents {
+            let height = windows.section_height(id);
+            let collapsed = windows.sections[&id].collapsed;
+            // Render a complete section before clipping so scrolling never reflows/truncates it.
+            let card = Rect::new(0, 0, rect.width, height);
+            let mut section = Buffer::empty(card);
+            self.render_agent_card_with_activity(id, card, collapsed, &mut section, cwd, activity);
+            for row in 0..height {
+                let content_row = offset.saturating_add(row);
+                if content_row < windows.scroll {
+                    continue;
+                }
+                let y = inner.y.saturating_add(content_row - windows.scroll);
+                if y >= inner.bottom() {
+                    break;
+                }
+                for x in 1..rect.width.saturating_sub(1) {
+                    buf[(rect.x + x, y)] = section[(x, row)].clone();
+                }
+                if row == 0 {
+                    windows
+                        .painted
+                        .push((id, Rect::new(inner.x, y, inner.width, 1)));
+                }
+            }
+            offset = offset.saturating_add(height);
         }
     }
-
     pub(in crate::app) fn window_areas(&self) -> Vec<Rect> {
         let windows = self.windows_ui.borrow();
         windows
-            .order
-            .iter()
-            .map(|id| windows.states[id].displayed())
-            .collect()
+            .window
+            .filter(|_| !windows.order.is_empty())
+            .map(|window| vec![window.rect])
+            .unwrap_or_default()
     }
-
     pub(super) fn window_mouse(&self, mouse: &MouseEvent) -> bool {
         let now = chrono::Utc::now().timestamp();
         let mut windows = self.windows_ui.borrow_mut();
-        // Lifecycle events can close a card between painting and the next pointer event.
-        // Only retain painted targets; never create an invisible target before the next draw.
         windows
             .order
             .retain(|id| self.agents.contains_key(id) && self.card_visible(*id, now));
-        let cancelled_capture = windows
-            .gesture
-            .is_some_and(|gesture| !windows.order.contains(&gesture.agent));
-        if cancelled_capture {
-            windows.gesture = None;
-            if matches!(
-                mouse.kind,
-                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-            ) {
-                return true;
-            }
+        let visible: HashSet<_> = windows.order.iter().copied().collect();
+        windows.painted.retain(|(id, _)| visible.contains(id));
+        if windows.order.is_empty() {
+            let captured = windows.gesture.take().is_some();
+            return captured
+                && matches!(
+                    mouse.kind,
+                    MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                );
         }
         windows.mouse(mouse)
     }
-
     pub(super) fn cancel_window_drag(&self) {
         self.windows_ui.borrow_mut().gesture = None;
     }
@@ -388,7 +361,6 @@ impl RootFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn event(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
         MouseEvent {
             kind,
@@ -397,133 +369,135 @@ mod tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         }
     }
-    fn windows() -> (Windows, ThreadId, ThreadId) {
-        let first = ThreadId::from_u128(1);
-        let second = ThreadId::from_u128(2);
-        let mut windows = Windows::default();
-        windows.sync(Rect::new(0, 0, 160, 40), &[first, second]);
-        (windows, first, second)
-    }
-    #[test]
-    fn agent_windows_wait_collapsed_then_auto_expand_and_respect_manual_choice() {
-        let id = ThreadId::from_u128(1);
-        let area = Rect::new(0, 0, 160, 40);
-        let mut windows = Windows::default();
-        windows.sync_ready(area, &[id], &HashSet::new());
-        assert!(windows.states[&id].collapsed);
-        assert_eq!(windows.states[&id].displayed().height, 3);
-        windows.sync_ready(area, &[id], &HashSet::from([id]));
-        assert!(!windows.states[&id].collapsed);
-        assert_eq!(windows.states[&id].displayed().height, DEFAULT_HEIGHT);
-        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0));
-        windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 157, 0));
-        windows.sync_ready(area, &[id], &HashSet::from([id]));
-        assert!(
-            windows.states[&id].collapsed,
-            "new summaries must not undo manual collapse"
-        );
-        let mut manual = Windows::default();
-        manual.sync_ready(area, &[id], &HashSet::new());
-        manual.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0));
-        manual.mouse(&event(MouseEventKind::Up(MouseButton::Left), 157, 0));
-        manual.sync_ready(area, &[id], &HashSet::from([id]));
-        assert!(!manual.states[&id].awaiting_text);
-        let mut manually_collapsed = Windows::default();
-        manually_collapsed.sync_ready(area, &[id], &HashSet::new());
-        for _ in 0..2 {
-            manually_collapsed.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0));
-            manually_collapsed.mouse(&event(MouseEventKind::Up(MouseButton::Left), 157, 0));
+    fn feed() -> RootFeed {
+        let mut feed = RootFeed::default();
+        for value in [1, 2] {
+            let id = ThreadId::from_u128(value);
+            feed.agents.insert(id, format!("/root/worker_{value}"));
+            feed.cards.entry(id).or_default().status =
+                codex_app_server_protocol::ThreadStatus::Active {
+                    active_flags: vec![],
+                };
+            feed.upsert(
+                MessageKey(id, "turn".into(), "message".into()),
+                &format!("I am checking component {value}."),
+                true,
+                true,
+                chrono::Utc::now().timestamp_millis(),
+                false,
+            );
         }
-        manually_collapsed.sync_ready(area, &[id], &HashSet::from([id]));
-        assert!(manually_collapsed.states[&id].collapsed);
+        feed
     }
-
-    #[test]
-    fn agent_windows_tile_down_right_and_preserve_hidden_agent_geometry() {
-        let (mut windows, first, second) = windows();
-        assert_eq!(windows.states[&first].rect, Rect::new(112, 0, 48, 10));
-        assert_eq!(windows.states[&second].rect, Rect::new(112, 10, 48, 10));
-        windows.states.get_mut(&first).unwrap().rect.x = 30;
-        windows.states.get_mut(&first).unwrap().rect.height = 15;
-        windows.sync(windows.viewport, &[second]);
-        assert!(!windows.order.contains(&first));
-        windows.sync(windows.viewport, &[first, second]);
-        assert_eq!(windows.states[&first].rect.x, 30);
-        assert_eq!(windows.states[&first].rect.height, 15);
+    fn render(feed: &RootFeed, height: u16) -> Buffer {
+        let area = Rect::new(0, 0, 160, height);
+        let mut buf = Buffer::empty(area);
+        feed.render_windows(area, &mut buf, Path::new("/tmp"), None);
+        buf
     }
     #[test]
-    fn agent_windows_new_agent_uses_vacant_tile_without_covering_existing_window() {
-        let (mut windows, first, second) = windows();
-        let newcomer = ThreadId::from_u128(0);
-        let before = windows.states[&first].rect;
-        windows.sync(windows.viewport, &[newcomer, first, second]);
-        assert_eq!(windows.states[&first].rect, before);
-        assert_eq!(windows.states[&newcomer].rect, Rect::new(112, 20, 48, 10));
+    fn agent_windows_share_one_frame_and_keep_agent_sections() {
+        let feed = feed();
+        let buf = render(&feed, 40);
+        assert_eq!(feed.window_areas(), vec![Rect::new(112, 0, 48, 22)]);
+        let text = crate::app::owned_transcript::tests::buffer_text(&buf);
+        assert_eq!(text.matches('╭').count(), 1);
+        assert_eq!(text.matches('╯').count(), 1);
+        assert!(text.contains("Subagents (2)"));
+        assert!(text.contains("worker_1") && text.contains("worker_2"));
+        assert!(text.contains("checking component 1") && text.contains("checking component 2"));
+        // Snapshot the shared window, excluding the uncovered transcript area.
+        let rect = feed.window_areas()[0];
+        let lines = (rect.y..rect.bottom())
+            .map(|y| {
+                (rect.x..rect.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!("combined_agent_window", lines);
     }
     #[test]
-    fn agent_windows_collapse_restore_height_and_capture_pointer_release() {
-        let (mut windows, first, _) = windows();
-        assert!(windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0)));
-        assert_eq!(windows.states[&first].displayed().height, 3);
-        assert_eq!(windows.states[&first].rect.height, 10);
-        assert!(windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 0, 39)));
-        assert!(windows.gesture.is_none());
-        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 0));
-        assert_eq!(windows.states[&first].displayed().height, 10);
+    fn agent_windows_shared_drag_resize_and_hidden_geometry_survive() {
+        let feed = feed();
+        render(&feed, 40);
+        feed.window_mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0));
+        feed.window_mouse(&event(MouseEventKind::Drag(MouseButton::Left), 30, 5));
+        feed.window_mouse(&event(MouseEventKind::Up(MouseButton::Left), 30, 5));
+        assert_eq!(feed.window_areas()[0], Rect::new(12, 5, 48, 22));
+        feed.window_mouse(&event(MouseEventKind::Down(MouseButton::Left), 59, 26));
+        feed.window_mouse(&event(MouseEventKind::Up(MouseButton::Left), 79, 30));
+        assert_eq!(feed.window_areas()[0], Rect::new(12, 5, 68, 26));
+        let mut ui = feed.windows_ui.borrow_mut();
+        ui.sync_ready(Rect::new(0, 0, 160, 40), &[], &HashSet::new());
+        assert!(ui.order.is_empty());
+        ui.sync_ready(
+            Rect::new(0, 0, 160, 40),
+            &[ThreadId::from_u128(1)],
+            &HashSet::new(),
+        );
+        assert_eq!(ui.window.unwrap().rect, Rect::new(12, 5, 68, 26));
     }
     #[test]
-    fn agent_windows_drag_resize_and_clamp_to_transcript_viewport() {
-        let (mut windows, first, _) = windows();
-        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0));
-        windows.mouse(&event(MouseEventKind::Drag(MouseButton::Left), 10, 39));
-        windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 10, 39));
-        assert_eq!(windows.states[&first].rect, Rect::new(0, 30, 48, 10));
-        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 47, 39));
-        windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 159, 39));
-        assert_eq!(windows.states[&first].rect.width, 160);
-        windows.sync(Rect::new(0, 0, 18, 8), &[first]);
-        assert_eq!(windows.states[&first].rect, Rect::new(0, 0, 18, 8));
-        assert!(windows.gesture.is_none());
+    fn agent_windows_scroll_overflow_only_inside_shared_frame() {
+        let feed = feed();
+        render(&feed, 12);
+        assert_eq!(feed.window_areas().len(), 1);
+        assert!(!feed.window_mouse(&event(MouseEventKind::ScrollDown, 10, 5)));
+        for _ in 0..10 {
+            assert!(feed.window_mouse(&event(MouseEventKind::ScrollDown, 130, 5)));
+        }
+        assert_eq!(feed.windows_ui.borrow().scroll, 10);
+        let buf = render(&feed, 12);
+        let text = crate::app::owned_transcript::tests::buffer_text(&buf);
+        assert!(text.contains("worker_2"));
+        assert!(text.contains("checking component 2"));
+        assert!(!text.contains("worker_1"));
+        assert!(text.contains("Scroll"));
+        for _ in 0..10 {
+            feed.window_mouse(&event(MouseEventKind::ScrollUp, 130, 5));
+        }
+        assert_eq!(feed.windows_ui.borrow().scroll, 0);
     }
     #[test]
-    fn agent_windows_click_raises_only_hit_window_and_wheel_stays_local() {
-        let (mut windows, first, second) = windows();
-        windows.states.get_mut(&second).unwrap().rect = Rect::new(120, 2, 40, 12);
-        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0));
-        windows.mouse(&event(MouseEventKind::Up(MouseButton::Left), 130, 0));
-        assert_eq!(windows.order.last(), Some(&first));
-        assert_eq!(windows.hit(Position::new(130, 4)), Some(first));
-        assert!(windows.mouse(&event(MouseEventKind::ScrollDown, 130, 4)));
-        assert!(!windows.mouse(&event(MouseEventKind::ScrollDown, 10, 4)));
+    fn agent_windows_sections_auto_expand_and_respect_manual_collapse() {
+        let feed = feed();
+        render(&feed, 40);
+        let first = ThreadId::from_u128(1);
+        feed.window_mouse(&event(MouseEventKind::Down(MouseButton::Left), 157, 1));
+        feed.window_mouse(&event(MouseEventKind::Up(MouseButton::Left), 157, 1));
+        render(&feed, 40);
+        assert!(feed.windows_ui.borrow().sections[&first].collapsed);
+        assert_eq!(feed.window_areas()[0].height, 15);
+        let second = ThreadId::from_u128(2);
+        let mut ui = Windows::default();
+        let area = Rect::new(0, 0, 160, 40);
+        ui.sync_ready(area, &[first, second], &HashSet::new());
+        assert_eq!(ui.window.unwrap().rect.height, 8);
+        ui.sync_ready(area, &[first, second], &HashSet::from([first]));
+        assert!(!ui.sections[&first].collapsed);
+        assert!(ui.sections[&second].collapsed);
+        assert_eq!(ui.window.unwrap().rect.height, 15);
     }
     #[test]
-    fn agent_windows_closed_after_paint_releases_hit_targets_and_finishes_capture() {
-        let feed = RootFeed::default();
-        let id = ThreadId::from_u128(1);
-        let mut feed = feed;
-        feed.agents.insert(id, "worker".into());
-        feed.cards.entry(id).or_default().status =
-            codex_app_server_protocol::ThreadStatus::Active {
-                active_flags: vec![],
-            };
-        feed.windows_ui
-            .borrow_mut()
-            .sync(Rect::new(0, 0, 160, 40), &[id]);
-        assert!(feed.window_mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0)));
-        feed.cards.entry(id).or_default().closed = true;
+    fn agent_windows_empty_or_tiny_viewport_releases_capture_and_targets() {
+        let mut feed = feed();
+        render(&feed, 40);
+        feed.window_mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0));
+        for card in feed.cards.values_mut() {
+            card.removed = true;
+        }
         assert!(feed.window_mouse(&event(MouseEventKind::Up(MouseButton::Left), 130, 0)));
-        assert!(feed.windows_ui.borrow().gesture.is_none());
-        assert!(!feed.window_mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0)));
         assert!(feed.window_areas().is_empty());
-    }
-    #[test]
-    fn agent_windows_tiny_viewport_has_no_hit_targets_and_removal_cancels_drag() {
-        let (mut windows, first, second) = windows();
-        windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 130, 0));
-        windows.sync(windows.viewport, &[second]);
-        assert!(windows.gesture.is_none());
-        windows.sync(Rect::new(0, 0, 7, 2), &[first, second]);
-        assert!(windows.order.is_empty());
-        assert!(!windows.mouse(&event(MouseEventKind::Down(MouseButton::Left), 0, 0)));
+        assert!(!feed.window_mouse(&event(MouseEventKind::ScrollDown, 130, 0)));
+        let mut ui = Windows::default();
+        ui.sync_ready(
+            Rect::new(0, 0, 7, 2),
+            &[ThreadId::from_u128(1)],
+            &HashSet::new(),
+        );
+        assert!(ui.order.is_empty());
+        assert!(!ui.mouse(&event(MouseEventKind::Down(MouseButton::Left), 0, 0)));
     }
 }

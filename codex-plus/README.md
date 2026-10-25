@@ -38,20 +38,20 @@ not guarantee that every newer frontend RPC is supported by an older service.
 
 ## Custom behavior
 
-- Fullscreen subagent windows start at 10 lines and eight columns wider than the
-  original quarter-width default, tile from the right, and retain
-  session positions and sizes. Drag a title to move, side/bottom borders to resize,
-  and click to bring forward. New windows start collapsed until summary/fallback
-  text is ready, then expand automatically. Explicit collapse/expand choices take
-  precedence. **▲** collapses to title and a one-line caption; **▼** expands.
-  **F6** toggles all windows. The title carries a status glyph (spinner while working, ○ idle, ? approval, ◇ input, ! error); reported
-  tokens sit in the bottom border. All eight
-  interior rows are available for summary text. Animation settings are respected.
-  The composer and main status bar stay unobscured.
-- On resume, only agents actively generating are admitted to the floating view;
+- Fullscreen subagents share one movable, resizable floating window, initially
+  eight columns wider than a quarter of the transcript. Drag its title to move it
+  and its sides/bottom to resize it. It grows with the agent sections until it
+  reaches the transcript height; manual sizing is retained. Mouse-wheel scrolling
+  inside the window reaches overflowing sections. **F6** toggles the shared window.
+  Each agent keeps its stable color, status glyph, summary and reported token
+  counts. Sections use ten lines (eight summary rows); **▲/▼** independently
+  collapse/expand each section to its caption. Empty sections start collapsed and
+  expand when text arrives unless manually toggled. The composer and main status
+  bar remain unobscured.
+- On resume, only agents actively generating are admitted to the shared view;
   idle/unloaded/error states and agents waiting for input or approval stay hidden,
   regardless of recency. A hidden agent appears automatically when it begins
-  generating. Once admitted in this TUI run, a window stays visible. Agents created
+  generating. Once admitted in this TUI run, an agent stays in the shared window. Agents created
   during this run remain visible even after closing; archive/delete removes them.
   After ten minutes of inactivity, border, name and border counters turn gray
   together; fresh activity restores the stable agent color. Polling, summarization
